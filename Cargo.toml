@@ -1,0 +1,44 @@
+[package]
+name = "ddp-router"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.79"
+base64 = "0.21.7"
+bson = "2.9.0"
+futures-util = "0.3.30"
+mongodb = "2.8.0"
+serde = { version = "1.0.196", features = ["derive"] }
+serde_json = { version = "1.0.112", features = ["preserve_order"] }
+tokio = { version = "1.35.1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-tungstenite = "0.21.0"
+
+[lints.clippy]
+all = "deny"
+default_trait_access = "deny"
+derive_partial_eq_without_eq = "deny"
+doc_markdown = "deny"
+enum_glob_use = "deny"
+explicit_deref_methods = "deny"
+explicit_iter_loop = "deny"
+flat_map_option = "deny"
+ignored_unit_patterns = "deny"
+inconsistent_struct_constructor = "deny"
+inefficient_to_string = "deny"
+items_after_statements = "deny"
+map_unwrap_or = "deny"
+match_wildcard_for_single_variants = "deny"
+needless_for_each = "deny"
+needless_pass_by_value = "deny"
+option_if_let_else = "deny"
+or_fun_call = "deny"
+redundant_closure_for_method_calls = "deny"
+semicolon_if_nothing_returned = "deny"
+single_match_else = "deny"
+struct_field_names = "deny"
+trivially_copy_pass_by_ref = "deny"
+uninlined_format_args = "deny"
+unnested_or_patterns = "deny"
+use_self = "deny"
+wildcard_imports = "deny"
