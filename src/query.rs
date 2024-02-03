@@ -1,31 +1,33 @@
+use crate::drop_handle::DropHandle;
 use crate::ejson::into_ejson_document;
 use crate::mergebox::Mergebox;
 use anyhow::{anyhow, bail, Error};
 use bson::{doc, to_document, Document};
 use futures_util::{StreamExt, TryStreamExt};
 use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
-use mongodb::change_stream::ChangeStream;
-use mongodb::options::{ChangeStreamOptions, FindOptions};
+use mongodb::options::FindOptions;
 use mongodb::Database;
 use serde_json::{Map, Value};
 use std::mem::{replace, take};
-use std::time::Duration;
+use std::sync::Arc;
+use tokio::spawn;
+use tokio::sync::Mutex;
+
+const OK: Result<(), Error> = Ok(());
 
 pub struct Query {
+    database: Database,
     collection: String,
     selector: Document,
     options: FindOptions,
-    documents: Vec<Map<String, Value>>,
-    change_stream: Option<ChangeStream<ChangeStreamEvent<Document>>>,
+    documents: Arc<Mutex<Vec<Map<String, Value>>>>,
+    change_stream: Option<DropHandle<Result<(), Error>>>,
 }
 
 impl Query {
-    async fn fetch(
-        &mut self,
-        database: &mut Database,
-        mergebox: &mut Mergebox,
-    ) -> Result<(), Error> {
-        let mut documents: Vec<_> = database
+    async fn fetch(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        let mut documents: Vec<_> = self
+            .database
             .collection::<Document>(&self.collection)
             .find(Some(self.selector.clone()), Some(self.options.clone()))
             .await?
@@ -33,90 +35,44 @@ impl Query {
             .try_collect()
             .await?;
 
+        let mut mergebox = mergebox.lock().await;
+
         for document in &mut documents {
-            let id = document
-                .remove("_id")
-                .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-            mergebox.insert(self.collection.clone(), id.clone(), document.clone())?;
+            let id = extract_id(document)?;
+            mergebox
+                .insert(self.collection.clone(), id.clone(), document.clone())
+                .await?;
             document.insert(String::from("_id"), id);
         }
 
-        for mut document in replace(&mut self.documents, documents) {
-            let id = document
-                .remove("_id")
-                .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-            mergebox.remove(self.collection.clone(), id, &document)?;
+        for mut document in replace(&mut *self.documents.lock().await, documents) {
+            let id = extract_id(&mut document)?;
+            mergebox
+                .remove(self.collection.clone(), id, &document)
+                .await?;
         }
 
-        Ok(())
+        OK
     }
 
-    pub async fn pool(
-        &mut self,
-        database: &mut Database,
-        mergebox: &mut Mergebox,
-    ) -> Result<(), Error> {
-        if let Some(change_stream) = &mut self.change_stream {
-            while let Some(event) = change_stream.next_if_any().await? {
-                match event {
-                    ChangeStreamEvent {
-                        operation_type: OperationType::Delete,
-                        document_key: Some(document),
-                        ..
-                    } => {
-                        let mut document = into_ejson_document(document);
-                        let id = document
-                            .remove("_id")
-                            .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-                        let index = self.documents.iter().position(|x| x.get("_id") == Some(&id)).ok_or_else(|| anyhow!("Document {id} not found"))?;
-                        let mut document = self.documents.swap_remove(index);
-                        document.remove("_id");
-                        mergebox.remove(self.collection.clone(), id, &document)?;
-                    }
-                    ChangeStreamEvent {
-                        operation_type: OperationType::Drop | OperationType::DropDatabase,
-                        ..
-                    } => {
-                        for mut document in take(&mut self.documents) {
-                            let id = document
-                                .remove("_id")
-                                .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-                            mergebox.remove(self.collection.clone(), id, &document)?;
-                        }
-                    }
-                    ChangeStreamEvent {
-                        operation_type: OperationType::Insert,
-                        full_document: Some(document),
-                        ..
-                    } => {
-                        let mut document = into_ejson_document(document);
-                        self.documents.push(document.clone());
-                        let id = document
-                            .remove("_id")
-                            .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-                        mergebox.insert(self.collection.clone(), id, document)?;
-                    }
-                    // TODO: Handle other events.
-                    _ => todo!("{event:?}"),
-                }
-            }
-
-            Ok(())
-        } else {
-            self.fetch(database, mergebox).await
+    pub async fn pool(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        if self.change_stream.is_none() {
+            self.fetch(mergebox).await?;
         }
+
+        OK
     }
 
-    pub async fn start(
+    pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        self.fetch(mergebox).await?;
+        self.start_change_stream(mergebox).await?;
+        OK
+    }
+
+    pub async fn start_change_stream(
         &mut self,
-        database: &mut Database,
-        mergebox: &mut Mergebox,
+        mergebox: &Arc<Mutex<Mergebox>>,
     ) -> Result<(), Error> {
-        self.fetch(database, mergebox).await?;
-        self.start_change_stream(database).await
-    }
-
-    pub async fn start_change_stream(&mut self, database: &mut Database) -> Result<(), Error> {
         // TODO: Both `limit` and `skip` will require a proper in-memory sorting.
         if self.options.limit.is_none() && self.options.skip.is_none() {
             let mut pipeline = vec![doc! { "$match": { "$expr": self.selector.clone() } }];
@@ -124,32 +80,54 @@ impl Query {
                 pipeline.push(doc! { "$project": projection.clone() });
             }
 
-            let mut options = ChangeStreamOptions::default();
-            options.max_await_time = Some(Duration::from_millis(0));
+            let collection = self.collection.clone();
+            let database = self.database.clone();
+            let documents = self.documents.clone();
+            let mergebox = mergebox.clone();
 
-            let change_stream = database
-                .collection::<Document>(&self.collection)
-                .watch(pipeline, Some(options))
-                .await?;
-            self.change_stream = Some(change_stream);
+            self.change_stream = Some(DropHandle::new(spawn(async move {
+                let mut change_stream = database
+                    .collection::<Document>(&collection)
+                    .watch(pipeline, None)
+                    .await?;
+
+                while let Some(event) = change_stream.try_next().await? {
+                    process_change_stream_event(event, &collection, &documents, &mergebox).await?;
+                }
+
+                OK
+            })));
         }
 
-        Ok(())
+        OK
     }
 
-    pub async fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
-        self.documents.into_iter().try_for_each(|mut document| {
-            let id = document
-                .remove("_id")
-                .ok_or_else(|| anyhow!("_id not found in {document:?}"))?;
-            mergebox.remove(self.collection.clone(), id, &document)
-        })
+    pub async fn stop(mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        // Shutdown Change Stream (if any).
+        if let Some(handle) = self.change_stream.take() {
+            handle.shutdown().await;
+        }
+
+        // Unregister all documents.
+        let documents = Arc::into_inner(self.documents)
+            .ok_or_else(|| anyhow!("Failed to consume Query.documents"))?
+            .into_inner();
+
+        let mut mergebox = mergebox.lock().await;
+        for mut document in documents {
+            let id = extract_id(&mut document)?;
+            mergebox
+                .remove(self.collection.clone(), id, &document)
+                .await?;
+        }
+
+        OK
     }
 }
 
-impl TryFrom<&Value> for Query {
+impl TryFrom<(&Database, &Value)> for Query {
     type Error = Error;
-    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+    fn try_from((database, value): (&Database, &Value)) -> Result<Self, Self::Error> {
         let Value::String(collection) = value
             .get("collectionName")
             .ok_or_else(|| anyhow!("Missing collectionName"))?
@@ -170,12 +148,80 @@ impl TryFrom<&Value> for Query {
         )?;
 
         Ok(Self {
+            database: database.clone(),
             collection: collection.clone(),
             selector,
             options,
-            documents: Vec::default(),
+            documents: Arc::default(),
             change_stream: None,
         })
+    }
+}
+
+fn extract_id(document: &mut Map<String, Value>) -> Result<Value, Error> {
+    document
+        .remove("_id")
+        .ok_or_else(|| anyhow!("_id not found in {document:?}"))
+}
+
+async fn process_change_stream_event(
+    event: ChangeStreamEvent<Document>,
+    collection: &str,
+    documents: &Arc<Mutex<Vec<Map<String, Value>>>>,
+    mergebox: &Arc<Mutex<Mergebox>>,
+) -> Result<(), Error> {
+    match event {
+        ChangeStreamEvent {
+            operation_type: OperationType::Delete,
+            document_key: Some(document),
+            ..
+        } => {
+            let mut document = into_ejson_document(document);
+            let id = extract_id(&mut document)?;
+            let index = documents
+                .lock()
+                .await
+                .iter()
+                .position(|x| x.get("_id") == Some(&id))
+                .ok_or_else(|| anyhow!("Document {id} not found"))?;
+            let mut document = documents.lock().await.swap_remove(index);
+            document.remove("_id");
+            mergebox
+                .lock()
+                .await
+                .remove(collection.to_owned(), id, &document)
+                .await
+        }
+        ChangeStreamEvent {
+            operation_type: OperationType::Drop | OperationType::DropDatabase,
+            ..
+        } => {
+            for mut document in take(&mut *documents.lock().await) {
+                let id = extract_id(&mut document)?;
+                mergebox
+                    .lock()
+                    .await
+                    .remove(collection.to_owned(), id, &document)
+                    .await?;
+            }
+            OK
+        }
+        ChangeStreamEvent {
+            operation_type: OperationType::Insert,
+            full_document: Some(document),
+            ..
+        } => {
+            let mut document = into_ejson_document(document);
+            documents.lock().await.push(document.clone());
+            let id = extract_id(&mut document)?;
+            mergebox
+                .lock()
+                .await
+                .insert(collection.to_owned(), id, document)
+                .await
+        }
+        // TODO: Handle other events.
+        _ => todo!("{event:?}"),
     }
 }
 

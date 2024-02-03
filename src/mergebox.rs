@@ -2,23 +2,18 @@ use crate::ddp::DDPMessage;
 use anyhow::{anyhow, Error};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::mem::take;
+use tokio::sync::mpsc::Sender;
 
 type Document = Map<String, Value>;
 
-#[derive(Default)]
 pub struct Mergebox {
     collections: BTreeMap<String, Vec<MergeboxDocument>>,
     server_view: BTreeMap<String, Vec<(Value, Document)>>,
-    pub messages: Vec<DDPMessage>,
+    pub messages_sink: Sender<DDPMessage>,
 }
 
 impl Mergebox {
-    pub fn flush(&mut self) -> Vec<DDPMessage> {
-        take(&mut self.messages)
-    }
-
-    pub fn insert(
+    pub async fn insert(
         &mut self,
         collection: String,
         id: Value,
@@ -29,30 +24,42 @@ impl Mergebox {
         if let Some(mergebox_index) = maybe_mergebox_index {
             let fields = mergebox_collection[mergebox_index].change(document);
             if !fields.is_empty() {
-                self.messages.push(DDPMessage::Changed {
-                    collection,
-                    id,
-                    fields: Some(fields),
-                    cleared: None,
-                });
+                self.messages_sink
+                    .send(DDPMessage::Changed {
+                        collection,
+                        id,
+                        fields: Some(fields),
+                        cleared: None,
+                    })
+                    .await?;
             }
         } else {
             mergebox_collection.push(MergeboxDocument::new(id.clone(), document.clone()));
-            self.messages.push(DDPMessage::Added {
-                collection,
-                id,
-                fields: if document.is_empty() {
-                    None
-                } else {
-                    Some(document)
-                },
-            });
+            self.messages_sink
+                .send(DDPMessage::Added {
+                    collection,
+                    id,
+                    fields: if document.is_empty() {
+                        None
+                    } else {
+                        Some(document)
+                    },
+                })
+                .await?;
         }
 
         Ok(())
     }
 
-    pub fn remove(
+    pub fn new(messages_sink: Sender<DDPMessage>) -> Self {
+        Self {
+            collections: BTreeMap::default(),
+            server_view: BTreeMap::default(),
+            messages_sink,
+        }
+    }
+
+    pub async fn remove(
         &mut self,
         collection: String,
         id: Value,
@@ -69,20 +76,24 @@ impl Mergebox {
         let cleared = mergebox_collection[mergebox_index].remove(document)?;
         if mergebox_collection[mergebox_index].count == 0 {
             mergebox_collection.swap_remove(mergebox_index);
-            self.messages.push(DDPMessage::Removed { collection, id });
+            self.messages_sink
+                .send(DDPMessage::Removed { collection, id })
+                .await?;
         } else if !cleared.is_empty() {
-            self.messages.push(DDPMessage::Changed {
-                collection,
-                id,
-                fields: None,
-                cleared: Some(cleared),
-            });
+            self.messages_sink
+                .send(DDPMessage::Changed {
+                    collection,
+                    id,
+                    fields: None,
+                    cleared: Some(cleared),
+                })
+                .await?;
         }
 
         Ok(())
     }
 
-    pub fn server_added(
+    pub async fn server_added(
         &mut self,
         collection: String,
         id: Value,
@@ -96,10 +107,10 @@ impl Mergebox {
             .push((id.clone(), document.clone()));
 
         // Update `collections`.
-        self.insert(collection, id, document)
+        self.insert(collection, id, document).await
     }
 
-    pub fn server_changed(
+    pub async fn server_changed(
         &mut self,
         collection: String,
         id: Value,
@@ -126,11 +137,12 @@ impl Mergebox {
         documents.push((id.clone(), document_applied.clone()));
 
         // Update `collections`.
-        self.insert(collection.clone(), id.clone(), document_applied)?;
-        self.remove(collection, id, &document)
+        self.insert(collection.clone(), id.clone(), document_applied)
+            .await?;
+        self.remove(collection, id, &document).await
     }
 
-    pub fn server_removed(&mut self, collection: String, id: Value) -> Result<(), Error> {
+    pub async fn server_removed(&mut self, collection: String, id: Value) -> Result<(), Error> {
         // Update `server_view`.
         let documents = self
             .server_view
@@ -143,7 +155,7 @@ impl Mergebox {
         let document = documents.swap_remove(index).1;
 
         // Update `collections`.
-        self.remove(collection, id, &document)
+        self.remove(collection, id, &document).await
     }
 }
 

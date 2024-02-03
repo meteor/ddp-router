@@ -1,70 +1,52 @@
-use crate::ddp::DDPMessage;
 use crate::mergebox::Mergebox;
 use crate::query::Query;
 use anyhow::Error;
 use mongodb::Database;
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub struct Subscription {
-    id: String,
+    pub id: String,
     queries: Vec<Query>,
 }
 
 impl Subscription {
-    pub async fn pool(
-        &mut self,
-        database: &mut Database,
-        mergebox: &mut Mergebox,
-    ) -> Result<(), Error> {
+    pub async fn pool(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
         for query in &mut self.queries {
-            query.pool(database, mergebox).await?;
+            query.pool(mergebox).await?;
         }
 
         Ok(())
     }
 
-    pub async fn start(
-        &mut self,
-        database: &mut Database,
-        mergebox: &mut Mergebox,
-    ) -> Result<(), Error> {
+    pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
         for query in &mut self.queries {
-            query.start(database, mergebox).await?;
+            query.start(mergebox).await?;
         }
-
-        // TODO: This should be handled elsewhere.
-        mergebox.messages.push(DDPMessage::Ready {
-            subs: vec![self.id.clone()],
-        });
 
         Ok(())
     }
 
-    pub async fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
+    pub async fn stop(self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<String, Error> {
         for query in self.queries {
             query.stop(mergebox).await?;
         }
 
-        // TODO: This should be handled elsewhere.
-        mergebox.messages.push(DDPMessage::Nosub {
-            id: self.id,
-            error: None,
-        });
-
-        Ok(())
+        Ok(self.id)
     }
 }
 
-impl TryFrom<(&String, &Vec<Value>)> for Subscription {
+impl TryFrom<(&Database, &String, &Vec<Value>)> for Subscription {
     type Error = Error;
-    fn try_from((id, value): (&String, &Vec<Value>)) -> Result<Self, Self::Error> {
+    fn try_from(
+        (database, id, value): (&Database, &String, &Vec<Value>),
+    ) -> Result<Self, Self::Error> {
+        let id = id.clone();
         let queries = value
             .iter()
-            .map(Query::try_from)
+            .map(|value| Query::try_from((database, value)))
             .collect::<Result<_, _>>()?;
-        Ok(Self {
-            id: id.clone(),
-            queries,
-        })
+        Ok(Self { id, queries })
     }
 }
