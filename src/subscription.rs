@@ -7,40 +7,50 @@ use serde_json::Value;
 
 pub struct Subscription {
     id: String,
-    initial_results_sent: bool,
     queries: Vec<Query>,
 }
 
 impl Subscription {
-    pub async fn fetch(
+    pub async fn pool(
         &mut self,
         database: &mut Database,
         mergebox: &mut Mergebox,
     ) -> Result<(), Error> {
         for query in &mut self.queries {
-            query.fetch(database, mergebox).await?;
-        }
-
-        if !self.initial_results_sent {
-            self.initial_results_sent = true;
-            // TODO: This should be handled elsewhere.
-            mergebox.messages.push(DDPMessage::Ready {
-                subs: vec![self.id.clone()],
-            });
+            query.pool(database, mergebox).await?;
         }
 
         Ok(())
     }
 
-    pub fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
-        self.queries
-            .into_iter()
-            .try_for_each(|query| query.stop(mergebox))?;
+    pub async fn start(
+        &mut self,
+        database: &mut Database,
+        mergebox: &mut Mergebox,
+    ) -> Result<(), Error> {
+        for query in &mut self.queries {
+            query.start(database, mergebox).await?;
+        }
+
+        // TODO: This should be handled elsewhere.
+        mergebox.messages.push(DDPMessage::Ready {
+            subs: vec![self.id.clone()],
+        });
+
+        Ok(())
+    }
+
+    pub async fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
+        for query in self.queries {
+            query.stop(mergebox).await?;
+        }
+
         // TODO: This should be handled elsewhere.
         mergebox.messages.push(DDPMessage::Nosub {
             id: self.id,
             error: None,
         });
+
         Ok(())
     }
 }
@@ -54,7 +64,6 @@ impl TryFrom<(&String, &Vec<Value>)> for Subscription {
             .collect::<Result<_, _>>()?;
         Ok(Self {
             id: id.clone(),
-            initial_results_sent: false,
             queries,
         })
     }

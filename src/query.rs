@@ -15,7 +15,7 @@ pub struct Query {
 }
 
 impl Query {
-    pub async fn fetch(
+    async fn fetch(
         &mut self,
         database: &mut Database,
         mergebox: &mut Mergebox,
@@ -46,7 +46,23 @@ impl Query {
         Ok(())
     }
 
-    pub fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
+    pub async fn pool(
+        &mut self,
+        database: &mut Database,
+        mergebox: &mut Mergebox,
+    ) -> Result<(), Error> {
+        self.fetch(database, mergebox).await
+    }
+
+    pub async fn start(
+        &mut self,
+        database: &mut Database,
+        mergebox: &mut Mergebox,
+    ) -> Result<(), Error> {
+        self.fetch(database, mergebox).await
+    }
+
+    pub async fn stop(self, mergebox: &mut Mergebox) -> Result<(), Error> {
         self.documents.into_iter().try_for_each(|mut document| {
             let id = document
                 .remove("_id")

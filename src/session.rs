@@ -100,6 +100,16 @@ impl Session {
         }
     }
 
+    async fn pool_subscriptions(&mut self) -> Result<(), Error> {
+        for subscription in self.subscriptions.values_mut() {
+            subscription
+                .pool(&mut self.database, &mut self.mergebox)
+                .await?;
+        }
+
+        self.flush_mergebox().await
+    }
+
     async fn process_client(&mut self, mut ddp_message: DDPMessage) -> Result<(), Error> {
         // Intercept a client subscription into a router-managed subscription.
         if let DDPMessage::Sub { id, name, params } = ddp_message {
@@ -115,7 +125,7 @@ impl Session {
         // Intercept a client unsubscription of a router-managed subscription.
         if let DDPMessage::Unsub { id } = &ddp_message {
             if let Some(subscription) = self.subscriptions.remove(id) {
-                subscription.stop(&mut self.mergebox)?;
+                subscription.stop(&mut self.mergebox).await?;
                 return self.flush_mergebox().await;
             }
         }
@@ -155,17 +165,21 @@ impl Session {
                     };
 
                     match parsed_subscription {
-                        Ok(subscription) => {
-                            // If the method succeeded and returned only supported
-                            // cursor descriptions, register them as router-managed
-                            // subscription.
+                        Ok(mut subscription) => {
+                            // If the method succeeded and returned only
+                            // supported cursor descriptions, register them as
+                            // router-managed subscription.
+                            subscription
+                                .start(&mut self.database, &mut self.mergebox)
+                                .await?;
+                            self.flush_mergebox().await?;
                             self.subscriptions.insert(id.clone(), subscription);
-                            return Ok(());
                         }
                         Err(error) => {
                             // If the method failed, did not provide a response,
-                            // used an incorrect format, or requires an unsupported
-                            // query, start a classic subscription instead.
+                            // used an incorrect format, or requires an
+                            // unsupported query option, start a classic server
+                            // subscription instead.
                             println!("\x1b[0;31m{error}\x1b[0m");
                             self.send_server(DDPMessage::Sub {
                                 id: id.clone(),
@@ -173,9 +187,10 @@ impl Session {
                                 params: inflight.params,
                             })
                             .await?;
-                            return Ok(());
                         }
                     }
+
+                    return Ok(());
                 }
 
                 self.send_client(ddp_message).await
@@ -221,16 +236,6 @@ impl Session {
         }
     }
 
-    async fn run_subscriptions(&mut self) -> Result<(), Error> {
-        for subscription in self.subscriptions.values_mut() {
-            subscription
-                .fetch(&mut self.database, &mut self.mergebox)
-                .await?;
-        }
-
-        self.flush_mergebox().await
-    }
-
     async fn send_client(&mut self, ddp_message: DDPMessage) -> Result<(), Error> {
         println!("\x1b[0;33mrouter\x1b[0m -> \x1b[0;34mclient\x1b[0m {ddp_message:?}");
         Ok(self.client.send(ddp_message.try_into()?).await?)
@@ -256,7 +261,7 @@ impl Session {
                     self.process_server(ddp_message).await?;
                 },
                 _ = interval.tick() => {
-                    self.run_subscriptions().await?;
+                    self.pool_subscriptions().await?;
                 },
             }
         }
