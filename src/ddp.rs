@@ -1,6 +1,6 @@
 use anyhow::Error;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, to_string, Value};
+use serde_json::{from_str, to_string, Map, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 /// <https://github.com/meteor/meteor/blob/devel/packages/ddp/DDP.md>
@@ -33,6 +33,50 @@ pub enum DDPMessage {
     },
 
     // Managing data.
+    #[serde(rename = "added")]
+    Added {
+        collection: String,
+        id: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fields: Option<Map<String, Value>>,
+    },
+    #[serde(rename = "addedBefore")]
+    AddedBefore {
+        collection: String,
+        id: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fields: Option<Map<String, Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
+    #[serde(rename = "changed")]
+    Changed {
+        collection: String,
+        id: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fields: Option<Map<String, Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cleared: Option<Vec<String>>,
+    },
+    #[serde(rename = "movedBefore")]
+    MovedBefore {
+        collection: String,
+        id: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
+    #[serde(rename = "removed")]
+    Removed { collection: String, id: Value },
+
+    // Managing subscriptions.
+    #[serde(rename = "nosub")]
+    Nosub {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<Value>,
+    },
+    #[serde(rename = "ready")]
+    Ready { subs: Vec<String> },
     #[serde(rename = "sub")]
     Sub {
         id: String,
@@ -42,48 +86,6 @@ pub enum DDPMessage {
     },
     #[serde(rename = "unsub")]
     Unsub { id: String },
-    #[serde(rename = "nosub")]
-    Nosub {
-        id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<Value>,
-    },
-    #[serde(rename = "added")]
-    Added {
-        collection: String,
-        id: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fields: Option<Value>,
-    },
-    #[serde(rename = "changed")]
-    Changed {
-        collection: String,
-        id: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fields: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cleared: Option<Vec<String>>,
-    },
-    #[serde(rename = "removed")]
-    Removed { collection: String, id: Value },
-    #[serde(rename = "ready")]
-    Ready { subs: Vec<String> },
-    #[serde(rename = "addedBefore")]
-    AddedBefore {
-        collection: String,
-        id: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        fields: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        before: Option<String>,
-    },
-    #[serde(rename = "movedBefore")]
-    MovedBefore {
-        collection: String,
-        id: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        before: Option<String>,
-    },
 
     // Remote procedure calls.
     #[serde(rename = "method")]

@@ -1,6 +1,7 @@
 mod ddp;
 mod ejson;
 mod mergebox;
+mod query;
 mod session;
 mod subscription;
 

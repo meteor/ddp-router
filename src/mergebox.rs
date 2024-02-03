@@ -1,14 +1,15 @@
 use crate::ddp::DDPMessage;
-use crate::ejson::IntoEjson;
 use anyhow::{anyhow, Error};
-use bson::Document;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::mem::take;
+
+type Document = Map<String, Value>;
 
 #[derive(Default)]
 pub struct Mergebox {
     collections: BTreeMap<String, Vec<MergeboxDocument>>,
+    server_view: BTreeMap<String, Vec<(Value, Document)>>,
     pub messages: Vec<DDPMessage>,
 }
 
@@ -17,28 +18,33 @@ impl Mergebox {
         take(&mut self.messages)
     }
 
-    pub fn insert(&mut self, collection: &str, id: Value, document: Document) -> Result<(), Error> {
-        let mergebox_collection = self.collections.entry(collection.to_owned()).or_default();
+    pub fn insert(
+        &mut self,
+        collection: String,
+        id: Value,
+        document: Document,
+    ) -> Result<(), Error> {
+        let mergebox_collection = self.collections.entry(collection.clone()).or_default();
         let maybe_mergebox_index = mergebox_collection.iter().position(|x| x.id == id);
         if let Some(mergebox_index) = maybe_mergebox_index {
             let fields = mergebox_collection[mergebox_index].change(document);
             if !fields.is_empty() {
                 self.messages.push(DDPMessage::Changed {
-                    collection: collection.to_owned(),
+                    collection,
                     id,
-                    fields: Some(fields.into_ejson()),
+                    fields: Some(fields),
                     cleared: None,
                 });
             }
         } else {
             mergebox_collection.push(MergeboxDocument::new(id.clone(), document.clone()));
             self.messages.push(DDPMessage::Added {
-                collection: collection.to_owned(),
+                collection,
                 id,
                 fields: if document.is_empty() {
                     None
                 } else {
-                    Some(document.into_ejson())
+                    Some(document)
                 },
             });
         }
@@ -48,13 +54,13 @@ impl Mergebox {
 
     pub fn remove(
         &mut self,
-        collection: &str,
+        collection: String,
         id: Value,
         document: &Document,
     ) -> Result<(), Error> {
         let mergebox_collection = self
             .collections
-            .get_mut(collection)
+            .get_mut(&collection)
             .ok_or_else(|| anyhow!("Collection {collection} not found"))?;
         let mergebox_index = mergebox_collection
             .iter()
@@ -63,19 +69,81 @@ impl Mergebox {
         let cleared = mergebox_collection[mergebox_index].remove(document)?;
         if mergebox_collection[mergebox_index].count == 0 {
             mergebox_collection.swap_remove(mergebox_index);
-            self.messages.push(DDPMessage::Removed {
-                collection: collection.to_owned(),
-                id,
-            });
+            self.messages.push(DDPMessage::Removed { collection, id });
         } else if !cleared.is_empty() {
             self.messages.push(DDPMessage::Changed {
-                collection: collection.to_owned(),
+                collection,
                 id,
                 fields: None,
                 cleared: Some(cleared),
             });
         }
+
         Ok(())
+    }
+
+    pub fn server_added(
+        &mut self,
+        collection: String,
+        id: Value,
+        fields: Option<Document>,
+    ) -> Result<(), Error> {
+        // Update `server_view`.
+        let document = fields.unwrap_or_default();
+        self.server_view
+            .entry(collection.clone())
+            .or_default()
+            .push((id.clone(), document.clone()));
+
+        // Update `collections`.
+        self.insert(collection, id, document)
+    }
+
+    pub fn server_changed(
+        &mut self,
+        collection: String,
+        id: Value,
+        fields: Option<Document>,
+        cleared: Option<Vec<String>>,
+    ) -> Result<(), Error> {
+        // Update `server_view`.
+        let documents = self
+            .server_view
+            .get_mut(&collection)
+            .ok_or_else(|| anyhow!("Collection not found {collection}"))?;
+        let index = documents
+            .iter()
+            .position(|x| x.0 == id)
+            .ok_or_else(|| anyhow!("Document not found {id}"))?;
+        let document = documents.swap_remove(index).1;
+        let mut document_applied = document.clone();
+        for field in cleared.into_iter().flatten() {
+            document_applied.remove(&field);
+        }
+        for (key, value) in fields.into_iter().flatten() {
+            document_applied.insert(key, value);
+        }
+        documents.push((id.clone(), document_applied.clone()));
+
+        // Update `collections`.
+        self.insert(collection.clone(), id.clone(), document_applied)?;
+        self.remove(collection, id, &document)
+    }
+
+    pub fn server_removed(&mut self, collection: String, id: Value) -> Result<(), Error> {
+        // Update `server_view`.
+        let documents = self
+            .server_view
+            .get_mut(&collection)
+            .ok_or_else(|| anyhow!("Collection not found {collection}"))?;
+        let index = documents
+            .iter()
+            .position(|x| x.0 == id)
+            .ok_or_else(|| anyhow!("Document not found {id}"))?;
+        let document = documents.swap_remove(index).1;
+
+        // Update `collections`.
+        self.remove(collection, id, &document)
     }
 }
 
@@ -92,15 +160,17 @@ impl MergeboxDocument {
         document
             .into_iter()
             .filter(|(field, value)| {
-                let value_as_ejson = value.clone().into_ejson();
                 if let Some(mergebox_field) = self.fields.get_mut(field) {
-                    let is_changed = mergebox_field.value != value_as_ejson;
                     mergebox_field.count += 1;
-                    mergebox_field.value = value_as_ejson;
-                    is_changed
+                    if mergebox_field.value != *value {
+                        mergebox_field.value = value.clone();
+                        true
+                    } else {
+                        false
+                    }
                 } else {
                     self.fields
-                        .insert(field.clone(), MergeboxField::new(value_as_ejson));
+                        .insert(field.clone(), MergeboxField::new(value.clone()));
                     true
                 }
             })
@@ -110,8 +180,9 @@ impl MergeboxDocument {
     pub fn new(id: Value, document: Document) -> Self {
         let fields = document
             .into_iter()
-            .map(|(field, value)| (field, MergeboxField::new(value.into_ejson())))
+            .map(|(field, value)| (field, MergeboxField::new(value)))
             .collect();
+
         Self {
             id,
             count: 1,

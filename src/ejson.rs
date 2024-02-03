@@ -1,44 +1,39 @@
 use base64::engine::{general_purpose::STANDARD, Engine};
 use bson::{Bson, Document};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Number, Value};
 
-pub trait IntoEjson {
-    fn into_ejson(self) -> Value;
-}
+pub fn into_ejson(bson: Bson) -> Value {
+    match bson {
+        // Meteor EJSON serialization.
+        Bson::Binary(v) => json!({ "$binary": STANDARD.encode(v.bytes)}),
+        Bson::DateTime(v) => json!({ "$date": v.timestamp_millis() }),
+        Bson::Decimal128(v) => json!({ "$type": "Decimal", "$value": v.to_string() }),
+        Bson::Double(v) if v.is_infinite() => json!({ "$InfNaN": v.signum() }),
+        Bson::Double(v) if v.is_nan() => json!({ "$InfNan": 0 }),
+        Bson::ObjectId(v) => json!({ "$type": "oid", "$value": v.to_hex() }),
+        Bson::RegularExpression(v) => json!({ "$regexp": v.pattern, "$flags": v.options }),
 
-impl IntoEjson for Bson {
-    fn into_ejson(self) -> Value {
-        match self {
-            // Meteor EJSON serialization.
-            Self::Binary(v) => json!({ "$binary": STANDARD.encode(v.bytes)}),
-            Self::DateTime(v) => json!({ "$date": v.timestamp_millis() }),
-            Self::Decimal128(v) => json!({ "$type": "Decimal", "$value": v.to_string() }),
-            Self::Double(v) if v.is_infinite() => json!({ "$InfNaN": v.signum() }),
-            Self::Double(v) if v.is_nan() => json!({ "$InfNan": 0 }),
-            Self::ObjectId(v) => json!({ "$type": "oid", "$value": v.to_hex() }),
-            Self::RegularExpression(v) => json!({ "$regexp": v.pattern, "$flags": v.options }),
+        // Standard JSON serialization.
+        Bson::Array(v) => Value::Array(v.into_iter().map(into_ejson).collect()),
+        Bson::Boolean(v) => Value::Bool(v),
+        Bson::Document(v) => Value::Object(into_ejson_document(v)),
+        Bson::Double(v) => Value::Number(Number::from_f64(v).unwrap()),
+        Bson::Int32(v) => Value::Number(Number::from(v)),
+        Bson::Int64(v) => Value::Number(Number::from(v)),
+        Bson::Null => Value::Null,
+        Bson::String(v) => Value::String(v),
 
-            // Standard JSON serialization.
-            Self::Array(v) => Value::Array(v.into_iter().map(IntoEjson::into_ejson).collect()),
-            Self::Boolean(v) => json!(v),
-            Self::Document(v) => v.into_ejson(),
-            Self::Double(v) => json!(v),
-            Self::Int32(v) => json!(v),
-            Self::Int64(v) => json!(v),
-            Self::Null => Value::Null,
-            Self::String(v) => json!(v),
-
-            // Replace everything else with `null`s.
-            v => {
-                println!("Unrecognized BSON value found: {v}");
-                Value::Null
-            }
+        // Replace everything else with `null`s.
+        v => {
+            println!("Unrecognized BSON value found: {v}");
+            Value::Null
         }
     }
 }
 
-impl IntoEjson for Document {
-    fn into_ejson(self) -> Value {
-        Value::Object(self.into_iter().map(|(k, v)| (k, v.into_ejson())).collect())
-    }
+pub fn into_ejson_document(document: Document) -> Map<String, Value> {
+    document
+        .into_iter()
+        .map(|(k, v)| (k, into_ejson(v)))
+        .collect()
 }
