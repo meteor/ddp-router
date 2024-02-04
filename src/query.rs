@@ -24,6 +24,10 @@ pub struct Query {
 }
 
 impl Query {
+    pub async fn is_same_query(&self, other: &Self) -> bool {
+        *self.query.lock().await == *other.query.lock().await
+    }
+
     pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
         let mergebox = mergebox.clone();
         let query = self.query.clone();
@@ -81,11 +85,50 @@ impl Query {
     }
 }
 
+impl TryFrom<(&Database, &Value)> for Query {
+    type Error = Error;
+    fn try_from((database, value): (&Database, &Value)) -> Result<Self, Self::Error> {
+        let Value::String(collection) = value
+            .get("collectionName")
+            .ok_or_else(|| anyhow!("Missing collectionName"))?
+        else {
+            bail!("Incorrect collectionName (expected a string)");
+        };
+
+        let selector = to_document(
+            value
+                .get("selector")
+                .ok_or_else(|| anyhow!("Missing selector"))?,
+        )?;
+
+        let options_raw = value
+            .get("options")
+            .ok_or_else(|| anyhow!("Missing options"))?
+            .clone();
+        let options = to_options(&options_raw)?;
+
+        let query = QueryInner {
+            database: database.clone(),
+            collection: collection.clone(),
+            selector,
+            options,
+            options_raw,
+            documents: Vec::default(),
+        };
+
+        Ok(Self {
+            query: Arc::new(Mutex::new(query)),
+            task: None,
+        })
+    }
+}
+
 struct QueryInner {
     database: Database,
     collection: String,
     selector: Document,
     options: FindOptions,
+    options_raw: Value,
     documents: Vec<Map<String, Value>>,
 }
 
@@ -208,40 +251,11 @@ impl QueryInner {
     }
 }
 
-impl TryFrom<(&Database, &Value)> for Query {
-    type Error = Error;
-    fn try_from((database, value): (&Database, &Value)) -> Result<Self, Self::Error> {
-        let Value::String(collection) = value
-            .get("collectionName")
-            .ok_or_else(|| anyhow!("Missing collectionName"))?
-        else {
-            bail!("Incorrect collectionName (expected a string)");
-        };
-
-        let selector = to_document(
-            value
-                .get("selector")
-                .ok_or_else(|| anyhow!("Missing selector"))?,
-        )?;
-
-        let options = to_options(
-            value
-                .get("options")
-                .ok_or_else(|| anyhow!("Missing options"))?,
-        )?;
-
-        let query = QueryInner {
-            database: database.clone(),
-            collection: collection.clone(),
-            selector,
-            options,
-            documents: Vec::default(),
-        };
-
-        Ok(Self {
-            query: Arc::new(Mutex::new(query)),
-            task: None,
-        })
+impl PartialEq for QueryInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.collection == other.collection
+            && self.selector == other.selector
+            && self.options_raw == other.options_raw
     }
 }
 

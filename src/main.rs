@@ -5,7 +5,7 @@ mod inflights;
 mod mergebox;
 mod query;
 mod session;
-mod subscription;
+mod subscriptions;
 
 use anyhow::Error;
 use mongodb::Client;

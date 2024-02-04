@@ -1,13 +1,11 @@
 use crate::ddp::DDPMessage;
 use crate::inflights::{Inflight, Inflights};
 use crate::mergebox::Mergebox;
-use crate::subscription::Subscription;
-use anyhow::{anyhow, Error};
+use crate::subscriptions::Subscriptions;
+use anyhow::Error;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use mongodb::Database;
-use serde_json::Value;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -21,10 +19,9 @@ const OK: Result<(), Error> = Ok(());
 async fn process_message_client(
     ddp_message: DDPMessage,
     inflights: &Arc<Mutex<Inflights>>,
-    mergebox: &Arc<Mutex<Mergebox>>,
     client_writer: &Sender<DDPMessage>,
     server_writer: &Sender<DDPMessage>,
-    subscriptions: &Arc<Mutex<BTreeMap<String, Subscription>>>,
+    subscriptions: &Arc<Mutex<Subscriptions>>,
 ) -> Result<(), Error> {
     match ddp_message {
         // Intercept a client subscription into a router-managed subscription.
@@ -46,15 +43,14 @@ async fn process_message_client(
 
         // Intercept a client unsubscription of a router-managed subscription.
         DDPMessage::Unsub { ref id } => {
-            if let Some(subscription) = subscriptions.lock().await.remove(id) {
-                let id = subscription.stop(mergebox).await?;
+            if let Some(id) = subscriptions.lock().await.stop(id).await? {
                 client_writer
                     .send(DDPMessage::Nosub { id, error: None })
                     .await?;
-                return OK;
+            } else {
+                server_writer.send(ddp_message).await?;
             }
 
-            server_writer.send(ddp_message).await?;
             OK
         }
 
@@ -67,12 +63,11 @@ async fn process_message_client(
 
 async fn process_message_server(
     ddp_message: DDPMessage,
-    database: &Database,
     inflights: &Arc<Mutex<Inflights>>,
     mergebox: &Arc<Mutex<Mergebox>>,
     client_writer: &Sender<DDPMessage>,
     server_writer: &Sender<DDPMessage>,
-    subscriptions: &Arc<Mutex<BTreeMap<String, Subscription>>>,
+    subscriptions: &Arc<Mutex<Subscriptions>>,
 ) -> Result<(), Error> {
     match ddp_message {
         // Hide router method calls.
@@ -83,46 +78,27 @@ async fn process_message_server(
         } => {
             let mut inflights = inflights.lock().await;
             if let Some(inflight) = inflights.process_result(id) {
-                let parsed_subscription = match (error, result) {
-                    (Some(error), _) => match error.get("reason") {
-                        Some(Value::String(message))
-                            if message
-                                == &format!(
-                                    "Method '__subscription__{}' not found",
-                                    inflight.name
-                                ) =>
-                        {
-                            Err(anyhow!(
-                                "Publication for {} was not registered",
-                                inflight.name
-                            ))
-                        }
-                        _ => Err(anyhow!(error.clone())),
-                    },
-                    (None, Some(Value::Array(cursor_descriptions))) => {
-                        Subscription::try_from((database, id, cursor_descriptions))
-                    }
-                    (None, _) => Err(anyhow!("Incorrect format")),
-                };
-
-                match parsed_subscription {
-                    Ok(mut subscription) => {
-                        // If the method succeeded and returned only
-                        // supported cursor descriptions, register them as
-                        // router-managed subscription.
-                        subscription.start(mergebox).await?;
+                match subscriptions
+                    .lock()
+                    .await
+                    .start(&inflight, id, error, result)
+                    .await
+                {
+                    Ok(()) => {
+                        // If the method succeeded and returned only supported
+                        // cursor descriptions, register them as router-managed
+                        // subscription.
                         client_writer
                             .send(DDPMessage::Ready {
-                                subs: vec![subscription.id.clone()],
+                                subs: vec![id.clone()],
                             })
                             .await?;
-                        subscriptions.lock().await.insert(id.clone(), subscription);
                     }
                     Err(error) => {
                         // If the method failed, did not provide a response,
-                        // used an incorrect format, or requires an
-                        // unsupported query option, start a classic server
-                        // subscription instead.
+                        // used an incorrect format, or requires an unsupported
+                        // query option, start a classic server subscription
+                        // instead.
                         println!("\x1b[0;31m{error}\x1b[0m");
                         server_writer
                             .send(DDPMessage::Sub {
@@ -133,11 +109,10 @@ async fn process_message_server(
                             .await?;
                     }
                 }
-
-                return OK;
+            } else {
+                client_writer.send(ddp_message).await?;
             }
 
-            client_writer.send(ddp_message).await?;
             OK
         }
 
@@ -217,10 +192,9 @@ async fn start_consumer_server(
 async fn start_producer_client(
     mut stream: SplitStream<WebSocketStream<TcpStream>>,
     inflights: Arc<Mutex<Inflights>>,
-    mergebox: Arc<Mutex<Mergebox>>,
     client_writer: Sender<DDPMessage>,
     server_writer: Sender<DDPMessage>,
-    subscriptions: Arc<Mutex<BTreeMap<String, Subscription>>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
         let ddp_message = DDPMessage::try_from(raw_message)?;
@@ -228,7 +202,6 @@ async fn start_producer_client(
         process_message_client(
             ddp_message,
             &inflights,
-            &mergebox,
             &client_writer,
             &server_writer,
             &subscriptions,
@@ -241,19 +214,17 @@ async fn start_producer_client(
 
 async fn start_producer_server(
     mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    database: Database,
     inflights: Arc<Mutex<Inflights>>,
     mergebox: Arc<Mutex<Mergebox>>,
     client_writer: Sender<DDPMessage>,
     server_writer: Sender<DDPMessage>,
-    subscriptions: Arc<Mutex<BTreeMap<String, Subscription>>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
         let ddp_message = DDPMessage::try_from(raw_message)?;
         println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
         process_message_server(
             ddp_message,
-            &database,
             &inflights,
             &mergebox,
             &client_writer,
@@ -285,21 +256,19 @@ pub async fn start_session(
 
     // Setup Mergebox.
     let mergebox = Arc::new(Mutex::new(Mergebox::new(client_writer.clone())));
-    let subscriptions = Arc::new(Mutex::new(BTreeMap::new()));
+    let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database, mergebox.clone())));
 
     // Setup communication handlers.
     let inflights = Arc::new(Mutex::new(Inflights::default()));
     tasks.spawn(start_producer_client(
         client_stream,
         inflights.clone(),
-        mergebox.clone(),
         client_writer.clone(),
         server_writer.clone(),
         subscriptions.clone(),
     ));
     tasks.spawn(start_producer_server(
         server_stream,
-        database,
         inflights,
         mergebox,
         client_writer,
