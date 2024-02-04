@@ -69,7 +69,7 @@ impl Query {
         let (collection, documents) = Arc::into_inner(self.query)
             .ok_or_else(|| anyhow!("Failed to consume Query"))?
             .into_inner()
-            .take()?;
+            .take();
 
         let mut mergebox = mergebox.lock().await;
         for mut document in documents {
@@ -86,7 +86,7 @@ struct QueryInner {
     collection: String,
     selector: Document,
     options: FindOptions,
-    documents: Arc<Mutex<Vec<Map<String, Value>>>>,
+    documents: Vec<Map<String, Value>>,
 }
 
 impl QueryInner {
@@ -123,14 +123,12 @@ impl QueryInner {
             } => {
                 let mut document = into_ejson_document(document);
                 let id = extract_id(&mut document)?;
-                let mut document = {
-                    let mut documents = self.documents.lock().await;
-                    let index = documents
-                        .iter()
-                        .position(|x| x.get("_id") == Some(&id))
-                        .ok_or_else(|| anyhow!("Document {id} not found"))?;
-                    documents.swap_remove(index)
-                };
+                let index = self
+                    .documents
+                    .iter()
+                    .position(|x| x.get("_id") == Some(&id))
+                    .ok_or_else(|| anyhow!("Document {id} not found"))?;
+                let mut document = self.documents.swap_remove(index);
                 document.remove("_id");
                 mergebox
                     .lock()
@@ -142,9 +140,8 @@ impl QueryInner {
                 operation_type: OperationType::Drop | OperationType::DropDatabase,
                 ..
             } => {
-                let documents = take(&mut *self.documents.lock().await);
                 let mut mergebox = mergebox.lock().await;
-                for mut document in documents {
+                for mut document in take(&mut self.documents) {
                     let id = extract_id(&mut document)?;
                     mergebox
                         .remove(self.collection.clone(), id, &document)
@@ -158,7 +155,7 @@ impl QueryInner {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
-                self.documents.lock().await.push(document.clone());
+                self.documents.push(document.clone());
                 let id = extract_id(&mut document)?;
                 mergebox
                     .lock()
@@ -191,7 +188,7 @@ impl QueryInner {
             document.insert(String::from("_id"), id);
         }
 
-        for mut document in replace(&mut *self.documents.lock().await, documents) {
+        for mut document in replace(&mut self.documents, documents) {
             let id = extract_id(&mut document)?;
             mergebox
                 .remove(self.collection.clone(), id, &document)
@@ -201,11 +198,8 @@ impl QueryInner {
         OK
     }
 
-    fn take(self) -> Result<(String, Vec<Map<String, Value>>), Error> {
-        let documents = Arc::into_inner(self.documents)
-            .ok_or_else(|| anyhow!("Failed to consume Query.documents"))?
-            .into_inner();
-        Ok((self.collection, documents))
+    fn take(self) -> (String, Vec<Map<String, Value>>) {
+        (self.collection, self.documents)
     }
 }
 
@@ -236,7 +230,7 @@ impl TryFrom<(&Database, &Value)> for Query {
             collection: collection.clone(),
             selector,
             options,
-            documents: Arc::default(),
+            documents: Vec::default(),
         };
 
         Ok(Self {
