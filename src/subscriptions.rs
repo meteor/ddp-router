@@ -15,14 +15,12 @@ pub struct Subscriptions {
 }
 
 impl Subscriptions {
-    async fn find_same_query(&self, query: &Query) -> Option<Arc<Query>> {
-        for other in self.queries_map.values().flatten() {
-            if other.is_same_query(query).await {
-                return Some(other.clone());
-            }
-        }
-
-        None
+    fn find_same_query(&self, query: &Query) -> Option<Arc<Query>> {
+        self.queries_map
+            .values()
+            .flatten()
+            .find(|other| ***other == *query)
+            .cloned()
     }
 
     pub fn new(database: Database, mergebox: Arc<Mutex<Mergebox>>) -> Self {
@@ -62,7 +60,7 @@ impl Subscriptions {
                     .map(|value| Query::try_from((&self.database, value)))
                     .collect::<Result<Vec<_>, _>>()?
                 {
-                    if let Some(query) = self.find_same_query(&query).await {
+                    if let Some(query) = self.find_same_query(&query) {
                         queries.push(query);
                     } else {
                         query.start(&self.mergebox).await?;

@@ -19,30 +19,21 @@ use tokio::time::interval;
 const OK: Result<(), Error> = Ok(());
 
 pub struct Query {
-    query: Arc<Mutex<QueryInner>>,
+    cursor_description: Value,
+    fetcher: Arc<Mutex<Fetcher>>,
     task: Option<DropHandle<Result<(), Error>>>,
 }
 
 impl Query {
-    pub async fn is_same_query(&self, other: &Self) -> bool {
-        *self.query.lock().await == *other.query.lock().await
-    }
-
     pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
         let mergebox = mergebox.clone();
-        let query = self.query.clone();
+        let fetcher = self.fetcher.clone();
         let _ = self.task.insert(DropHandle::new(spawn(async move {
-            // Fetch initial results.
-            let maybe_change_stream = {
-                let mut query = query.lock().await;
-                query.fetch(&mergebox).await?;
-                query.create_change_stream().await?
-            };
-
             // Start a Change Stream or fall back to pooling.
-            if let Some(mut change_stream) = maybe_change_stream {
+            if let Some(mut change_stream) = fetcher.lock().await.create_change_stream().await? {
+                fetcher.lock().await.fetch(&mergebox).await?;
                 while let Some(event) = change_stream.try_next().await? {
-                    query
+                    fetcher
                         .lock()
                         .await
                         .handle_change_stream_event(event, &mergebox)
@@ -55,7 +46,7 @@ impl Query {
                 let mut timer = interval(Duration::from_secs(5));
                 loop {
                     timer.tick().await;
-                    query.lock().await.fetch(&mergebox).await?;
+                    fetcher.lock().await.fetch(&mergebox).await?;
                 }
             }
         })));
@@ -70,7 +61,7 @@ impl Query {
         }
 
         // Unregister all documents.
-        let (collection, documents) = Arc::into_inner(self.query)
+        let (collection, documents) = Arc::into_inner(self.fetcher)
             .ok_or_else(|| anyhow!("Failed to consume Query"))?
             .into_inner()
             .take();
@@ -82,6 +73,12 @@ impl Query {
         }
 
         OK
+    }
+}
+
+impl PartialEq for Query {
+    fn eq(&self, other: &Self) -> bool {
+        self.cursor_description == other.cursor_description
     }
 }
 
@@ -101,38 +98,35 @@ impl TryFrom<(&Database, &Value)> for Query {
                 .ok_or_else(|| anyhow!("Missing selector"))?,
         )?;
 
-        let options_raw = value
-            .get("options")
-            .ok_or_else(|| anyhow!("Missing options"))?
-            .clone();
-        let options = to_options(&options_raw)?;
-
-        let query = QueryInner {
-            database: database.clone(),
-            collection: collection.clone(),
-            selector,
-            options,
-            options_raw,
-            documents: Vec::default(),
-        };
+        let options = to_options(
+            value
+                .get("options")
+                .ok_or_else(|| anyhow!("Missing options"))?,
+        )?;
 
         Ok(Self {
-            query: Arc::new(Mutex::new(query)),
+            cursor_description: value.clone(),
+            fetcher: Arc::new(Mutex::new(Fetcher {
+                database: database.clone(),
+                collection: collection.clone(),
+                selector,
+                options,
+                documents: Vec::default(),
+            })),
             task: None,
         })
     }
 }
 
-struct QueryInner {
+struct Fetcher {
     database: Database,
     collection: String,
     selector: Document,
     options: FindOptions,
-    options_raw: Value,
     documents: Vec<Map<String, Value>>,
 }
 
-impl QueryInner {
+impl Fetcher {
     async fn create_change_stream(
         &self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
@@ -248,14 +242,6 @@ impl QueryInner {
 
     fn take(self) -> (String, Vec<Map<String, Value>>) {
         (self.collection, self.documents)
-    }
-}
-
-impl PartialEq for QueryInner {
-    fn eq(&self, other: &Self) -> bool {
-        self.collection == other.collection
-            && self.selector == other.selector
-            && self.options_raw == other.options_raw
     }
 }
 
