@@ -11,10 +11,9 @@ use mongodb::Database;
 use serde_json::{Map, Value};
 use std::mem::{replace, take};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::spawn;
 use tokio::sync::Mutex;
-use tokio::time::interval;
+use tokio::time::{interval_at, Duration, Instant};
 
 const OK: Result<(), Error> = Ok(());
 
@@ -26,12 +25,22 @@ pub struct Query {
 
 impl Query {
     pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        println!("\x1b[0;33mrouter\x1b[0m start({})", self.cursor_description);
+
+        // Run initial query.
+        self.fetcher.lock().await.fetch(&mergebox).await?;
+
+        // Start background task.
         let mergebox = mergebox.clone();
         let fetcher = self.fetcher.clone();
         let _ = self.task.insert(DropHandle::new(spawn(async move {
+            // Separate context to eliminate locking.
+            let maybe_change_stream = {
+                fetcher.lock().await.create_change_stream().await?
+            };
+
             // Start a Change Stream or fall back to pooling.
-            if let Some(mut change_stream) = fetcher.lock().await.create_change_stream().await? {
-                fetcher.lock().await.fetch(&mergebox).await?;
+            if let Some(mut change_stream) = maybe_change_stream {
                 while let Some(event) = change_stream.try_next().await? {
                     fetcher
                         .lock()
@@ -43,7 +52,8 @@ impl Query {
                 OK
             } else {
                 // TODO: Make interval configurable.
-                let mut timer = interval(Duration::from_secs(5));
+                let interval = Duration::from_secs(5);
+                let mut timer = interval_at(Instant::now() + interval, interval);
                 loop {
                     timer.tick().await;
                     fetcher.lock().await.fetch(&mergebox).await?;
@@ -55,6 +65,8 @@ impl Query {
     }
 
     pub async fn stop(mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        println!("\x1b[0;33mrouter\x1b[0m  stop({})", self.cursor_description);
+
         // Shutdown task (if any).
         if let Some(task) = self.task.take() {
             task.shutdown().await;
@@ -98,15 +110,16 @@ impl TryFrom<(&Database, &Value)> for Query {
                 .ok_or_else(|| anyhow!("Missing selector"))?,
         )?;
 
-        let options = to_options(
-            value
-                .get("options")
-                .ok_or_else(|| anyhow!("Missing options"))?,
-        )?;
+        let options_raw = value
+            .get("options")
+            .ok_or_else(|| anyhow!("Missing options"))?
+            .clone();
+        let options = to_options(&options_raw)?;
 
         Ok(Self {
             cursor_description: value.clone(),
             fetcher: Arc::new(Mutex::new(Fetcher {
+                cursor_description: value.clone(),
                 database: database.clone(),
                 collection: collection.clone(),
                 selector,
@@ -119,6 +132,7 @@ impl TryFrom<(&Database, &Value)> for Query {
 }
 
 struct Fetcher {
+    cursor_description: Value,
     database: Database,
     collection: String,
     selector: Document,
@@ -131,7 +145,7 @@ impl Fetcher {
         &self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
         // FIXME: Change Streams DO NOT work at the moment.
-        if false {
+        if true {
             return Ok(None);
         }
 
@@ -211,6 +225,8 @@ impl Fetcher {
     }
 
     async fn fetch(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
+        println!("\x1b[0;32mmongo\x1b[0m  fetch({})", self.cursor_description);
+
         let mut documents: Vec<_> = self
             .database
             .collection::<Document>(&self.collection)
