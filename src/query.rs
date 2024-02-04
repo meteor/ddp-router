@@ -93,6 +93,11 @@ impl QueryInner {
     async fn create_change_stream(
         &self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
+        // FIXME: Change Streams DO NOT work at the moment.
+        if false {
+            return Ok(None);
+        }
+
         if self.options.limit.is_some() && self.options.skip.is_some() {
             return Ok(None);
         }
