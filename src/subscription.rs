@@ -12,14 +12,6 @@ pub struct Subscription {
 }
 
 impl Subscription {
-    pub async fn pool(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
-        for query in &mut self.queries {
-            query.pool(mergebox).await?;
-        }
-
-        Ok(())
-    }
-
     pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
         for query in &mut self.queries {
             query.start(mergebox).await?;

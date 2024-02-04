@@ -9,12 +9,10 @@ use mongodb::Database;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tokio::time::interval;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -268,19 +266,6 @@ async fn start_producer_server(
     OK
 }
 
-async fn start_subscriptions_pooler(
-    mergebox: Arc<Mutex<Mergebox>>,
-    subscriptions: Arc<Mutex<BTreeMap<String, Subscription>>>,
-) -> Result<(), Error> {
-    let mut interval = interval(Duration::from_secs(5));
-    loop {
-        interval.tick().await;
-        for subscription in subscriptions.lock().await.values_mut() {
-            subscription.pool(&mergebox).await?;
-        }
-    }
-}
-
 pub async fn start_session(
     database: Database,
     client: WebSocketStream<TcpStream>,
@@ -301,11 +286,6 @@ pub async fn start_session(
     // Setup Mergebox.
     let mergebox = Arc::new(Mutex::new(Mergebox::new(client_writer.clone())));
     let subscriptions = Arc::new(Mutex::new(BTreeMap::new()));
-
-    tasks.spawn(start_subscriptions_pooler(
-        mergebox.clone(),
-        subscriptions.clone(),
-    ));
 
     // Setup communication handlers.
     let inflights = Arc::new(Mutex::new(Inflights::default()));
