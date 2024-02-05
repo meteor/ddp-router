@@ -1,13 +1,14 @@
 use crate::drop_handle::DropHandle;
 use crate::ejson::into_ejson_document;
 use crate::mergebox::Mergebox;
-use anyhow::{anyhow, bail, Error};
-use bson::{doc, to_document, Document};
+use anyhow::{anyhow, Error};
+use bson::{doc, Document};
 use futures_util::{StreamExt, TryStreamExt};
 use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
 use mongodb::change_stream::ChangeStream;
 use mongodb::options::FindOptions;
 use mongodb::Database;
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::mem::{replace, take};
 use std::sync::Arc;
@@ -17,27 +18,29 @@ use tokio::time::{interval_at, Duration, Instant};
 
 const OK: Result<(), Error> = Ok(());
 
-pub struct Query {
-    cursor_description: Value,
-    fetcher: Arc<Mutex<Fetcher>>,
+pub struct Cursor {
+    description: CursorDescription,
+    fetcher: Arc<Mutex<CursorFetcher>>,
     task: Option<DropHandle<Result<(), Error>>>,
 }
 
-impl Query {
+impl Cursor {
+    pub fn description(&self) -> &CursorDescription {
+        &self.description
+    }
+
     pub async fn start(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
-        println!("\x1b[0;33mrouter\x1b[0m start({})", self.cursor_description);
+        println!("\x1b[0;33mrouter\x1b[0m start({:?})", self.description);
 
         // Run initial query.
-        self.fetcher.lock().await.fetch(&mergebox).await?;
+        self.fetcher.lock().await.fetch(mergebox).await?;
 
         // Start background task.
         let mergebox = mergebox.clone();
         let fetcher = self.fetcher.clone();
         let _ = self.task.insert(DropHandle::new(spawn(async move {
             // Separate context to eliminate locking.
-            let maybe_change_stream = {
-                fetcher.lock().await.create_change_stream().await?
-            };
+            let maybe_change_stream = { fetcher.lock().await.create_change_stream().await? };
 
             // Start a Change Stream or fall back to pooling.
             if let Some(mut change_stream) = maybe_change_stream {
@@ -65,7 +68,7 @@ impl Query {
     }
 
     pub async fn stop(mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
-        println!("\x1b[0;33mrouter\x1b[0m  stop({})", self.cursor_description);
+        println!("\x1b[0;33mrouter\x1b[0m  stop({:?})", self.description);
 
         // Shutdown task (if any).
         if let Some(task) = self.task.take() {
@@ -73,74 +76,49 @@ impl Query {
         }
 
         // Unregister all documents.
-        let (collection, documents) = Arc::into_inner(self.fetcher)
+        let documents = Arc::into_inner(self.fetcher)
             .ok_or_else(|| anyhow!("Failed to consume Query"))?
             .into_inner()
-            .take();
+            .documents;
 
         let mut mergebox = mergebox.lock().await;
         for mut document in documents {
             let id = extract_id(&mut document)?;
-            mergebox.remove(collection.clone(), id, &document).await?;
+            mergebox
+                .remove(self.description.collection.clone(), id, &document)
+                .await?;
         }
 
         OK
     }
 }
 
-impl PartialEq for Query {
-    fn eq(&self, other: &Self) -> bool {
-        self.cursor_description == other.cursor_description
-    }
-}
-
-impl TryFrom<(&Database, &Value)> for Query {
-    type Error = Error;
-    fn try_from((database, value): (&Database, &Value)) -> Result<Self, Self::Error> {
-        let Value::String(collection) = value
-            .get("collectionName")
-            .ok_or_else(|| anyhow!("Missing collectionName"))?
-        else {
-            bail!("Incorrect collectionName (expected a string)");
-        };
-
-        let selector = to_document(
-            value
-                .get("selector")
-                .ok_or_else(|| anyhow!("Missing selector"))?,
-        )?;
-
-        let options_raw = value
-            .get("options")
-            .ok_or_else(|| anyhow!("Missing options"))?
-            .clone();
-        let options = to_options(&options_raw)?;
-
-        Ok(Self {
-            cursor_description: value.clone(),
-            fetcher: Arc::new(Mutex::new(Fetcher {
-                cursor_description: value.clone(),
-                database: database.clone(),
-                collection: collection.clone(),
-                selector,
-                options,
-                documents: Vec::default(),
-            })),
+impl From<CursorFetcher> for Cursor {
+    fn from(fetcher: CursorFetcher) -> Self {
+        Self {
+            description: fetcher.description.clone(),
+            fetcher: Arc::new(Mutex::new(fetcher)),
             task: None,
-        })
+        }
     }
 }
 
-struct Fetcher {
-    cursor_description: Value,
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CursorDescription {
+    #[serde(rename = "collectionName")]
+    pub collection: String,
+    pub selector: Document,
+    pub options: CursorOptions,
+}
+
+pub struct CursorFetcher {
     database: Database,
-    collection: String,
-    selector: Document,
-    options: FindOptions,
+    description: CursorDescription,
     documents: Vec<Map<String, Value>>,
 }
 
-impl Fetcher {
+impl CursorFetcher {
     async fn create_change_stream(
         &self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
@@ -149,18 +127,23 @@ impl Fetcher {
             return Ok(None);
         }
 
-        if self.options.limit.is_some() && self.options.skip.is_some() {
+        let CursorDescription {
+            collection,
+            selector,
+            options,
+        } = &self.description;
+        if options.limit.is_some() && options.skip.is_some() {
             return Ok(None);
         }
 
-        let mut pipeline = vec![doc! { "$match": { "$expr": self.selector.clone() } }];
-        if let Some(projection) = &self.options.projection {
+        let mut pipeline = vec![doc! { "$match": { "$expr": selector.clone() } }];
+        if let Some(projection) = &options.projection {
             pipeline.push(doc! { "$project": projection.clone() });
         }
 
         let change_stream = self
             .database
-            .collection::<Document>(&self.collection)
+            .collection::<Document>(collection)
             .watch(pipeline, None)
             .await?;
         Ok(Some(change_stream))
@@ -189,7 +172,7 @@ impl Fetcher {
                 mergebox
                     .lock()
                     .await
-                    .remove(self.collection.clone(), id, &document)
+                    .remove(self.description.collection.clone(), id, &document)
                     .await
             }
             ChangeStreamEvent {
@@ -200,7 +183,7 @@ impl Fetcher {
                 for mut document in take(&mut self.documents) {
                     let id = extract_id(&mut document)?;
                     mergebox
-                        .remove(self.collection.clone(), id, &document)
+                        .remove(self.description.collection.clone(), id, &document)
                         .await?;
                 }
                 OK
@@ -216,7 +199,7 @@ impl Fetcher {
                 mergebox
                     .lock()
                     .await
-                    .insert(self.collection.clone(), id, document)
+                    .insert(self.description.collection.clone(), id, document)
                     .await
             }
             // TODO: Handle other events.
@@ -225,12 +208,15 @@ impl Fetcher {
     }
 
     async fn fetch(&mut self, mergebox: &Arc<Mutex<Mergebox>>) -> Result<(), Error> {
-        println!("\x1b[0;32mmongo\x1b[0m  fetch({})", self.cursor_description);
+        println!("\x1b[0;32mmongo\x1b[0m  fetch({:?})", self.description);
 
         let mut documents: Vec<_> = self
             .database
-            .collection::<Document>(&self.collection)
-            .find(Some(self.selector.clone()), Some(self.options.clone()))
+            .collection::<Document>(&self.description.collection)
+            .find(
+                Some(self.description.selector.clone()),
+                Some(self.description.options.clone().into()),
+            )
             .await?
             .map(|maybe_document| maybe_document.map(into_ejson_document))
             .try_collect()
@@ -241,7 +227,11 @@ impl Fetcher {
         for document in &mut documents {
             let id = extract_id(document)?;
             mergebox
-                .insert(self.collection.clone(), id.clone(), document.clone())
+                .insert(
+                    self.description.collection.clone(),
+                    id.clone(),
+                    document.clone(),
+                )
                 .await?;
             document.insert(String::from("_id"), id);
         }
@@ -249,15 +239,40 @@ impl Fetcher {
         for mut document in replace(&mut self.documents, documents) {
             let id = extract_id(&mut document)?;
             mergebox
-                .remove(self.collection.clone(), id, &document)
+                .remove(self.description.collection.clone(), id, &document)
                 .await?;
         }
 
         OK
     }
 
-    fn take(self) -> (String, Vec<Map<String, Value>>) {
-        (self.collection, self.documents)
+    pub fn new(database: Database, description: CursorDescription) -> Self {
+        Self {
+            database,
+            description,
+            documents: Vec::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CursorOptions {
+    pub limit: Option<i64>,
+    pub projection: Option<Document>,
+    pub skip: Option<u64>,
+    pub sort: Option<Document>,
+    pub transform: Option<()>,
+}
+
+impl From<CursorOptions> for FindOptions {
+    fn from(options: CursorOptions) -> Self {
+        Self::builder()
+            .limit(options.limit)
+            .projection(options.projection)
+            .skip(options.skip)
+            .sort(options.sort)
+            .build()
     }
 }
 
@@ -265,35 +280,4 @@ fn extract_id(document: &mut Map<String, Value>) -> Result<Value, Error> {
     document
         .remove("_id")
         .ok_or_else(|| anyhow!("_id not found in {document:?}"))
-}
-
-fn to_options(options: &Value) -> Result<FindOptions, Error> {
-    let Value::Object(options) = options else {
-        bail!("Incorrect options (expected an object)");
-    };
-
-    options
-        .into_iter()
-        .try_fold(FindOptions::default(), |mut options, (option, value)| {
-            match (option.as_str(), value) {
-                ("limit", Value::Number(limit)) => match limit.as_i64() {
-                    None => bail!("Invalid limit = {limit:?}"),
-                    limit => options.limit = limit,
-                },
-                ("projection", Value::Object(projection)) => {
-                    options.projection = Some(to_document(&projection)?);
-                }
-                ("skip", Value::Number(skip)) => match skip.as_u64() {
-                    None => bail!("Invalid skip = {skip:?}"),
-                    skip => options.skip = skip,
-                },
-                ("sort", Value::Object(sort)) => {
-                    options.sort = Some(to_document(&sort)?);
-                }
-                ("transform", Value::Null) => {}
-                (option, value) => bail!("Unknown option {option} = {value:?}"),
-            }
-
-            Ok(options)
-        })
 }

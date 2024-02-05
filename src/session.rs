@@ -81,7 +81,7 @@ async fn process_message_server(
                 match subscriptions
                     .lock()
                     .await
-                    .start(&inflight, id, error, result)
+                    .start(&inflight, id.clone(), error, result)
                     .await
                 {
                     Ok(()) => {

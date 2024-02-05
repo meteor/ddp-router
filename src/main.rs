@@ -1,9 +1,9 @@
+mod cursor;
 mod ddp;
 mod drop_handle;
 mod ejson;
 mod inflights;
 mod mergebox;
-mod query;
 mod session;
 mod subscriptions;
 

@@ -9,7 +9,7 @@ type Document = Map<String, Value>;
 pub struct Mergebox {
     collections: BTreeMap<String, Vec<MergeboxDocument>>,
     server_view: BTreeMap<String, Vec<(Value, Document)>>,
-    pub messages_sink: Sender<DDPMessage>,
+    messages_sink: Sender<DDPMessage>,
 }
 
 impl Mergebox {
