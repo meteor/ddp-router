@@ -2,9 +2,60 @@ use crate::ddp::DDPMessage;
 use anyhow::{anyhow, Error};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::Mutex;
 
 type Document = Map<String, Value>;
+
+#[derive(Default)]
+pub struct Mergeboxes(BTreeMap<usize, Arc<Mutex<Mergebox>>>);
+
+impl Mergeboxes {
+    pub async fn insert(
+        &mut self,
+        collection: String,
+        id: Value,
+        document: Document,
+    ) -> Result<(), Error> {
+        for mergebox in self.0.values_mut() {
+            mergebox
+                .lock()
+                .await
+                .insert(collection.clone(), id.clone(), document.clone())
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub fn insert_mergebox(&mut self, session_id: usize, mergebox: &Arc<Mutex<Mergebox>>) -> bool {
+        self.0.insert(session_id, mergebox.clone());
+        self.0.len() == 1
+    }
+
+    pub async fn remove(
+        &mut self,
+        collection: String,
+        id: Value,
+        document: &Document,
+    ) -> Result<(), Error> {
+        for mergebox in self.0.values_mut() {
+            mergebox
+                .lock()
+                .await
+                .remove(collection.clone(), id.clone(), document)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    pub fn remove_mergebox(&mut self, session_id: usize) -> bool {
+        self.0.remove(&session_id);
+        self.0.is_empty()
+    }
+}
 
 pub struct Mergebox {
     collections: BTreeMap<String, Vec<MergeboxDocument>>,

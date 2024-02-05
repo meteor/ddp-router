@@ -11,25 +11,26 @@ use tokio::sync::Mutex;
 
 pub struct Subscriptions {
     database: Database,
-    mergebox: Arc<Mutex<Mergebox>>,
-    cursors_by_collection: BTreeMap<String, Vec<Weak<Cursor>>>,
-    cursors_by_subscription: BTreeMap<String, Vec<Arc<Cursor>>>,
+    cursors_by_collection: BTreeMap<String, Vec<Weak<Mutex<Cursor>>>>,
+    #[allow(clippy::type_complexity)]
+    cursors_by_session: BTreeMap<usize, BTreeMap<String, Vec<Arc<Mutex<Cursor>>>>>,
 }
 
 impl Subscriptions {
-    pub fn new(database: Database, mergebox: Arc<Mutex<Mergebox>>) -> Self {
+    pub fn new(database: Database) -> Self {
         Self {
             database,
-            mergebox,
             cursors_by_collection: BTreeMap::default(),
-            cursors_by_subscription: BTreeMap::default(),
+            cursors_by_session: BTreeMap::default(),
         }
     }
 
     pub async fn start(
         &mut self,
+        session_id: usize,
+        mergebox: &Arc<Mutex<Mergebox>>,
         inflight: &Inflight,
-        id: String,
+        subscription_id: &str,
         error: &Option<Value>,
         result: &Option<Value>,
     ) -> Result<(), Error> {
@@ -61,14 +62,22 @@ impl Subscriptions {
         // Start.
         let mut cursors = vec![];
         for description in descriptions {
-            cursors.push(self.start_cursor(description).await?);
+            cursors.push(self.start_cursor(session_id, mergebox, description).await?);
         }
 
-        self.cursors_by_subscription.insert(id, cursors);
+        self.cursors_by_session
+            .entry(session_id)
+            .or_default()
+            .insert(subscription_id.to_owned(), cursors);
         Ok(())
     }
 
-    async fn start_cursor(&mut self, description: CursorDescription) -> Result<Arc<Cursor>, Error> {
+    async fn start_cursor(
+        &mut self,
+        session_id: usize,
+        mergebox: &Arc<Mutex<Mergebox>>,
+        description: CursorDescription,
+    ) -> Result<Arc<Mutex<Cursor>>, Error> {
         // Search for existing cursor with the same description. While at it,
         // remove all empty references.
         let cursors = self
@@ -76,9 +85,19 @@ impl Subscriptions {
             .entry(description.collection.clone())
             .or_default();
         for index in (0..cursors.len()).rev() {
-            if let Some(existing) = cursors[index].upgrade() {
-                if *existing.description() == description {
-                    return Ok(existing);
+            if let Some(cursor) = cursors[index].upgrade() {
+                let is_deduplicated = {
+                    let mut cursor = cursor.lock().await;
+                    if *cursor.description() == description {
+                        cursor.start(session_id, mergebox).await?;
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if is_deduplicated {
+                    return Ok(cursor);
                 }
             } else {
                 cursors.swap_remove(index);
@@ -88,24 +107,51 @@ impl Subscriptions {
         // Create and start a new cursor.
         let fetcher = CursorFetcher::new(self.database.clone(), description);
         let mut cursor = Cursor::from(fetcher);
-        cursor.start(&self.mergebox).await?;
+        cursor.start(session_id, mergebox).await?;
 
         // Store a weak reference for faster lookups.
-        let cursor = Arc::new(cursor);
+        let cursor = Arc::new(Mutex::new(cursor));
         cursors.push(Arc::downgrade(&cursor));
         Ok(cursor)
     }
 
-    pub async fn stop(&mut self, id: &str) -> Result<Option<String>, Error> {
-        if let Some((id, cursors)) = self.cursors_by_subscription.remove_entry(id) {
+    pub async fn stop(
+        &mut self,
+        session_id: usize,
+        mergebox: &Arc<Mutex<Mergebox>>,
+        subscription_id: &str,
+    ) -> Result<Option<String>, Error> {
+        if let Some((subscription_id, cursors)) = self
+            .cursors_by_session
+            .get_mut(&session_id)
+            .ok_or_else(|| anyhow!("Session not found {session_id}"))?
+            .remove_entry(subscription_id)
+        {
             for cursor in cursors {
-                if let Some(cursor) = Arc::into_inner(cursor) {
-                    cursor.stop(&self.mergebox).await?;
-                }
+                cursor.lock().await.stop(session_id, mergebox).await?;
             }
-            Ok(Some(id))
+            Ok(Some(subscription_id))
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn stop_all(
+        &mut self,
+        session_id: usize,
+        mergebox: &Arc<Mutex<Mergebox>>,
+    ) -> Result<(), Error> {
+        let cursors = self
+            .cursors_by_session
+            .remove(&session_id)
+            .ok_or_else(|| anyhow!("Session not found {session_id}"))?
+            .into_values()
+            .flatten()
+            .collect::<Vec<_>>();
+        for cursor in cursors {
+            cursor.lock().await.stop(session_id, mergebox).await?;
+        }
+
+        Ok(())
     }
 }

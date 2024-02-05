@@ -5,7 +5,6 @@ use crate::subscriptions::Subscriptions;
 use anyhow::Error;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
-use mongodb::Database;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -16,17 +15,21 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const OK: Result<(), Error> = Ok(());
 
-async fn process_message_client(
-    ddp_message: DDPMessage,
-    inflights: &Arc<Mutex<Inflights>>,
-    client_writer: &Sender<DDPMessage>,
-    server_writer: &Sender<DDPMessage>,
-    subscriptions: &Arc<Mutex<Subscriptions>>,
-) -> Result<(), Error> {
+struct Session {
+    id: usize,
+    client_writer: Sender<DDPMessage>,
+    server_writer: Sender<DDPMessage>,
+    inflights: Mutex<Inflights>,
+    mergebox: Arc<Mutex<Mergebox>>,
+    subscriptions: Arc<Mutex<Subscriptions>>,
+}
+
+async fn process_message_client(session: &Session, ddp_message: DDPMessage) -> Result<(), Error> {
     match ddp_message {
         // Intercept a client subscription into a router-managed subscription.
         DDPMessage::Sub { id, name, params } => {
-            server_writer
+            session
+                .server_writer
                 .send(DDPMessage::Method {
                     id: id.clone(),
                     method: format!("__subscription__{name}"),
@@ -34,7 +37,8 @@ async fn process_message_client(
                     random_seed: None,
                 })
                 .await?;
-            inflights
+            session
+                .inflights
                 .lock()
                 .await
                 .register(id, Inflight::new(name, params));
@@ -43,32 +47,32 @@ async fn process_message_client(
 
         // Intercept a client unsubscription of a router-managed subscription.
         DDPMessage::Unsub { ref id } => {
-            if let Some(id) = subscriptions.lock().await.stop(id).await? {
-                client_writer
+            if let Some(id) = session
+                .subscriptions
+                .lock()
+                .await
+                .stop(session.id, &session.mergebox, id)
+                .await?
+            {
+                session
+                    .client_writer
                     .send(DDPMessage::Nosub { id, error: None })
                     .await?;
             } else {
-                server_writer.send(ddp_message).await?;
+                session.server_writer.send(ddp_message).await?;
             }
 
             OK
         }
 
         _ => {
-            server_writer.send(ddp_message).await?;
+            session.server_writer.send(ddp_message).await?;
             OK
         }
     }
 }
 
-async fn process_message_server(
-    ddp_message: DDPMessage,
-    inflights: &Arc<Mutex<Inflights>>,
-    mergebox: &Arc<Mutex<Mergebox>>,
-    client_writer: &Sender<DDPMessage>,
-    server_writer: &Sender<DDPMessage>,
-    subscriptions: &Arc<Mutex<Subscriptions>>,
-) -> Result<(), Error> {
+async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> Result<(), Error> {
     match ddp_message {
         // Hide router method calls.
         DDPMessage::Result {
@@ -76,54 +80,60 @@ async fn process_message_server(
             ref error,
             ref result,
         } => {
-            let mut inflights = inflights.lock().await;
-            if let Some(inflight) = inflights.process_result(id) {
-                match subscriptions
-                    .lock()
-                    .await
-                    .start(&inflight, id.clone(), error, result)
-                    .await
-                {
-                    Ok(()) => {
-                        // If the method succeeded and returned only supported
-                        // cursor descriptions, register them as router-managed
-                        // subscription.
-                        client_writer
-                            .send(DDPMessage::Ready {
-                                subs: vec![id.clone()],
-                            })
-                            .await?;
-                    }
-                    Err(error) => {
-                        // If the method failed, did not provide a response,
-                        // used an incorrect format, or requires an unsupported
-                        // query option, start a classic server subscription
-                        // instead.
-                        println!("\x1b[0;31m{error}\x1b[0m");
-                        server_writer
-                            .send(DDPMessage::Sub {
-                                id: id.clone(),
-                                name: inflight.name,
-                                params: inflight.params,
-                            })
-                            .await?;
-                    }
+            let mut inflights = session.inflights.lock().await;
+            let Some(inflight) = inflights.process_result(id) else {
+                session.client_writer.send(ddp_message).await?;
+                return OK;
+            };
+
+            match session
+                .subscriptions
+                .lock()
+                .await
+                .start(session.id, &session.mergebox, &inflight, id, error, result)
+                .await
+            {
+                Ok(()) => {
+                    // If the method succeeded and returned only supported
+                    // cursor descriptions, register them as router-managed
+                    // subscription.
+                    let subs = vec![id.clone()];
+                    session
+                        .client_writer
+                        .send(DDPMessage::Ready { subs })
+                        .await?;
                 }
-            } else {
-                client_writer.send(ddp_message).await?;
+                Err(error) => {
+                    // If the method failed, did not provide a response,
+                    // used an incorrect format, or requires an unsupported
+                    // query option, start a classic server subscription
+                    // instead.
+                    println!("\x1b[0;31m{error}\x1b[0m");
+                    session
+                        .server_writer
+                        .send(DDPMessage::Sub {
+                            id: id.clone(),
+                            name: inflight.name,
+                            params: inflight.params,
+                        })
+                        .await?;
+                }
             }
 
             OK
         }
 
         DDPMessage::Updated { mut methods } => {
-            let mut inflights = inflights.lock().await;
+            let mut inflights = session.inflights.lock().await;
             methods.retain(|id| !inflights.process_update(id));
             if methods.is_empty() {
                 return OK;
             }
 
-            client_writer.send(DDPMessage::Updated { methods }).await?;
+            session
+                .client_writer
+                .send(DDPMessage::Updated { methods })
+                .await?;
             OK
         }
 
@@ -133,7 +143,8 @@ async fn process_message_server(
             collection,
             fields,
         } => {
-            mergebox
+            session
+                .mergebox
                 .lock()
                 .await
                 .server_added(collection, id, fields)
@@ -146,7 +157,8 @@ async fn process_message_server(
             fields,
             cleared,
         } => {
-            mergebox
+            session
+                .mergebox
                 .lock()
                 .await
                 .server_changed(collection, id, fields, cleared)
@@ -154,12 +166,17 @@ async fn process_message_server(
         }
 
         DDPMessage::Removed { id, collection } => {
-            mergebox.lock().await.server_removed(collection, id).await
+            session
+                .mergebox
+                .lock()
+                .await
+                .server_removed(collection, id)
+                .await
         }
 
         // Pass-through other DDP messages.
         _ => {
-            client_writer.send(ddp_message).await?;
+            session.client_writer.send(ddp_message).await?;
             OK
         }
     }
@@ -191,22 +208,12 @@ async fn start_consumer_server(
 
 async fn start_producer_client(
     mut stream: SplitStream<WebSocketStream<TcpStream>>,
-    inflights: Arc<Mutex<Inflights>>,
-    client_writer: Sender<DDPMessage>,
-    server_writer: Sender<DDPMessage>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
+    session: Arc<Session>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
         let ddp_message = DDPMessage::try_from(raw_message)?;
         println!("\x1b[0;34mclient\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
-        process_message_client(
-            ddp_message,
-            &inflights,
-            &client_writer,
-            &server_writer,
-            &subscriptions,
-        )
-        .await?;
+        process_message_client(&session, ddp_message).await?;
     }
 
     OK
@@ -214,37 +221,26 @@ async fn start_producer_client(
 
 async fn start_producer_server(
     mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
-    inflights: Arc<Mutex<Inflights>>,
-    mergebox: Arc<Mutex<Mergebox>>,
-    client_writer: Sender<DDPMessage>,
-    server_writer: Sender<DDPMessage>,
-    subscriptions: Arc<Mutex<Subscriptions>>,
+    session: Arc<Session>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
         let ddp_message = DDPMessage::try_from(raw_message)?;
         println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
-        process_message_server(
-            ddp_message,
-            &inflights,
-            &mergebox,
-            &client_writer,
-            &server_writer,
-            &subscriptions,
-        )
-        .await?;
+        process_message_server(&session, ddp_message).await?;
     }
 
     OK
 }
 
 pub async fn start_session(
-    database: Database,
+    id: usize,
+    subscriptions: Arc<Mutex<Subscriptions>>,
     client: WebSocketStream<TcpStream>,
     server: WebSocketStream<MaybeTlsStream<TcpStream>>,
 ) -> Result<(), Error> {
     let mut tasks = JoinSet::new();
 
-    // Setup websockets queues and communication.
+    // Setup websockets queues and message consumers.
     let (client_sink, client_stream) = client.split();
     let (server_sink, server_stream) = server.split();
 
@@ -254,31 +250,30 @@ pub async fn start_session(
     tasks.spawn(start_consumer_client(client_reader, client_sink));
     tasks.spawn(start_consumer_server(server_reader, server_sink));
 
-    // Setup Mergebox.
-    let mergebox = Arc::new(Mutex::new(Mergebox::new(client_writer.clone())));
-    let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database, mergebox.clone())));
-
-    // Setup communication handlers.
-    let inflights = Arc::new(Mutex::new(Inflights::default()));
-    tasks.spawn(start_producer_client(
-        client_stream,
-        inflights.clone(),
-        client_writer.clone(),
-        server_writer.clone(),
-        subscriptions.clone(),
-    ));
-    tasks.spawn(start_producer_server(
-        server_stream,
-        inflights,
-        mergebox,
-        client_writer,
+    // Setup session.
+    let session = Arc::new(Session {
+        id,
+        client_writer: client_writer.clone(),
         server_writer,
+        inflights: Mutex::new(Inflights::default()),
+        mergebox: Arc::new(Mutex::new(Mergebox::new(client_writer.clone()))),
         subscriptions,
-    ));
+    });
 
-    // Stop when any task's finished.
-    // (It's safe to `unwrap` here, as we know there are tasks there.)
-    tasks.join_next().await.unwrap()??;
-    tasks.shutdown().await;
+    // Setup message producers.
+    tasks.spawn(start_producer_client(client_stream, session.clone()));
+    tasks.spawn(start_producer_server(server_stream, session.clone()));
+
+    // Stop when any task's finished. Before the error is unwrapped (all of the
+    // tasks will stop only when an error happens), stop all subscriptions made
+    // in this session. (It's safe to `unwrap` here - there's always a task.)
+    let result = tasks.join_next().await.unwrap();
+    session
+        .subscriptions
+        .lock()
+        .await
+        .stop_all(session.id, &session.mergebox)
+        .await?;
+    result??;
     OK
 }
