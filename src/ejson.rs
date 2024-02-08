@@ -1,6 +1,42 @@
 use base64::engine::{general_purpose::STANDARD, Engine};
-use bson::{Bson, Document};
+use bson::oid::ObjectId;
+use bson::{Bson, DateTime, Decimal128, Document};
 use serde_json::{json, Map, Number, Value};
+use std::str::FromStr;
+
+pub fn from_ejson(bson: &mut Bson) {
+    let Bson::Document(document) = bson else {
+        return;
+    };
+
+    let mut keys: Vec<_> = document.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    match keys.as_slice() {
+        ["$date"] => {
+            if let Ok(date) = document.get_i64("$date") {
+                *bson = Bson::DateTime(DateTime::from_millis(date));
+            }
+        }
+        ["$type"] => match document.get_str("$type") {
+            Ok("Decimal") => {
+                if let Ok(value) = document.get_str("$value") {
+                    if let Ok(value) = Decimal128::from_str(value) {
+                        *bson = Bson::Decimal128(value);
+                    }
+                }
+            }
+            Ok("oid") => {
+                if let Ok(value) = document.get_str("$value") {
+                    if let Ok(value) = ObjectId::from_str(value) {
+                        *bson = Bson::ObjectId(value);
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
 
 pub fn into_ejson(bson: Bson) -> Value {
     match bson {

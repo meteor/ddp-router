@@ -1,12 +1,13 @@
 use crate::drop_handle::DropHandle;
-use crate::ejson::into_ejson_document;
+use crate::ejson::{from_ejson, into_ejson_document};
+use crate::matcher::{is_matching, is_supported};
 use crate::mergebox::{Mergebox, Mergeboxes};
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
 use mongodb::change_stream::ChangeStream;
-use mongodb::options::FindOptions;
+use mongodb::options::{ChangeStreamOptions, FindOptions, FullDocumentType};
 use mongodb::Database;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -52,7 +53,7 @@ impl Cursor {
 
             // Start background task.
             let fetcher = self.fetcher.clone();
-            let _ = self.task.insert(DropHandle::new(spawn(async move {
+            let task = async move {
                 // Separate context to eliminate locking.
                 let maybe_change_stream = { fetcher.lock().await.create_change_stream().await? };
 
@@ -76,7 +77,15 @@ impl Cursor {
                         fetcher.lock().await.fetch(&mergeboxes).await?;
                     }
                 }
-            })));
+            }
+            // TODO: Better handling of subtasks.
+            .then(|result| async move {
+                if let Err(error) = &result {
+                    println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
+                }
+                result
+            });
+            let _ = self.task.insert(DropHandle::new(spawn(task)));
         } else {
             let documents = { self.fetcher.lock().await.documents.clone() };
 
@@ -155,29 +164,59 @@ impl CursorFetcher {
     async fn create_change_stream(
         &self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
-        // FIXME: Change Streams DO NOT work at the moment.
-        if true {
-            return Ok(None);
-        }
-
         let CursorDescription {
             collection,
             selector,
             options,
         } = &self.description;
-        if options.limit.is_some() && options.skip.is_some() {
+
+        // We have to understand the selector to process the Change Stream
+        // events correctly.
+        if !is_supported(selector) {
+            println!(
+                "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector not supported\x1b[0m ({selector:?})"
+            );
             return Ok(None);
         }
 
-        let mut pipeline = vec![doc! { "$match": { "$expr": selector.clone() } }];
-        if let Some(projection) = &options.projection {
-            pipeline.push(doc! { "$project": projection.clone() });
+        // TODO: Implement MongoDB projections.
+        let has_projection = options
+            .projection
+            .as_ref()
+            .map_or(false, |projection| !projection.is_empty());
+        if has_projection {
+            println!(
+                "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection not supported\x1b[0m ({:?})",
+                options.projection
+            );
+            return Ok(None);
         }
 
+        // TODO: Implement MongoDB sorting.
+        if options.limit.is_some() || options.skip.is_some() || options.sort.is_some() {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31moptions not supported\x1b[0m ({options:?})");
+            return Ok(None);
+        }
+
+        // TODO: Reusue Change Streams between `Cursor`s.
+        // The current Meteor's Oplog tailing has to refetch a document by `_id`
+        // when a document outside of the current documents set is updated and
+        // it _may_ match the selector now. With Change Streams we can skip that
+        // by fetching the full documents.
+        // https://github.com/meteor/meteor/blob/7411b3c85a3c95a6b6f3c588babe6eae894d6fb6/packages/mongo/oplog_observe_driver.js#L652
+        let pipeline = [
+            doc! { "$match": { "operationType": { "$in": ["delete", "drop", "dropDatabase", "insert", "update"] } } },
+            doc! { "$project": { "_id": 1, "documentKey": 1, "fullDocument": 1, "ns": 1, "operationType": 1 } },
+        ];
+        let options = ChangeStreamOptions::builder()
+            // TODO: Ideally we would use `Required` here, but it has to be
+            // enabled on the database level. It should be configurable.
+            .full_document(Some(FullDocumentType::UpdateLookup))
+            .build();
         let change_stream = self
             .database
-            .collection::<Document>(collection)
-            .watch(pipeline, None)
+            .collection(collection)
+            .watch(pipeline, Some(options))
             .await?;
         Ok(Some(change_stream))
     }
@@ -227,6 +266,10 @@ impl CursorFetcher {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
+                if !is_matching(&self.description.selector, &document) {
+                    return OK;
+                }
+
                 self.documents.push(document.clone());
                 let id = extract_id(&mut document)?;
                 mergeboxes
@@ -235,8 +278,44 @@ impl CursorFetcher {
                     .insert(self.description.collection.clone(), id, document)
                     .await
             }
+            ChangeStreamEvent {
+                operation_type: OperationType::Update,
+                full_document: Some(document),
+                ..
+            } => {
+                let mut document = into_ejson_document(document);
+                let is_matching = is_matching(&self.description.selector, &document);
+                if is_matching {
+                    self.documents.push(document.clone());
+                }
+
+                let id = extract_id(&mut document)?;
+                if is_matching {
+                    mergeboxes
+                        .lock()
+                        .await
+                        .insert(self.description.collection.clone(), id.clone(), document)
+                        .await?;
+                }
+
+                let maybe_index = self
+                    .documents
+                    .iter()
+                    .position(|x| x.get("_id") == Some(&id));
+                if let Some(index) = maybe_index {
+                    let mut document = self.documents.swap_remove(index);
+                    document.remove("_id");
+                    mergeboxes
+                        .lock()
+                        .await
+                        .remove(self.description.collection.clone(), id, &document)
+                        .await?;
+                }
+
+                OK
+            }
             // TODO: Handle other events.
-            _ => todo!("{event:?}"),
+            _ => Err(anyhow!("Unsupported event {event:?}")),
         }
     }
 
@@ -279,7 +358,12 @@ impl CursorFetcher {
         OK
     }
 
-    pub fn new(database: Database, description: CursorDescription) -> Self {
+    pub fn new(database: Database, mut description: CursorDescription) -> Self {
+        // Decode EJSON selector into a BSON one.
+        for (_, value) in description.selector.iter_mut() {
+            from_ejson(value);
+        }
+
         Self {
             database,
             description,

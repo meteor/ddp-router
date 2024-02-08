@@ -108,7 +108,7 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                     // used an incorrect format, or requires an unsupported
                     // query option, start a classic server subscription
                     // instead.
-                    println!("\x1b[0;31m{error}\x1b[0m");
+                    println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
                     session
                         .server_writer
                         .send(DDPMessage::Sub {

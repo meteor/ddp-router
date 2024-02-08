@@ -3,6 +3,7 @@ mod ddp;
 mod drop_handle;
 mod ejson;
 mod inflights;
+mod matcher;
 mod mergebox;
 mod session;
 mod subscriptions;
@@ -21,9 +22,10 @@ use tokio_tungstenite::{accept_async, connect_async};
 async fn main() -> Result<(), Error> {
     let mut session_id_counter = 0;
     let listener = TcpListener::bind("127.0.0.1:4000").await?;
-    let database = Client::with_uri_str("mongodb://127.0.0.1:3001/?directConnection=true")
-        .await?
-        .database("meteor");
+    let database =
+        Client::with_uri_str("mongodb://127.0.0.1:27017/?directConnection=true&maxPoolSize=100")
+            .await?
+            .database("meteor");
     let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database)));
 
     loop {
