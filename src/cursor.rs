@@ -1,7 +1,8 @@
 use crate::drop_handle::DropHandle;
 use crate::ejson::into_ejson_document;
-use crate::matcher::{is_matching, is_supported};
+use crate::matcher as Matcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
+use crate::projector as Projector;
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
 use futures_util::{FutureExt, StreamExt, TryStreamExt};
@@ -172,7 +173,7 @@ impl CursorFetcher {
 
         // We have to understand the selector to process the Change Stream
         // events correctly.
-        if !is_supported(selector) {
+        if !Matcher::is_supported(selector) {
             println!(
                 "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector not supported\x1b[0m ({selector:?})"
             );
@@ -180,11 +181,7 @@ impl CursorFetcher {
         }
 
         // TODO: Implement MongoDB projections.
-        let has_projection = options
-            .projection
-            .as_ref()
-            .map_or(false, |projection| !projection.is_empty());
-        if has_projection {
+        if !Projector::is_supported(options.projection.as_ref()) {
             println!(
                 "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection not supported\x1b[0m ({:?})",
                 options.projection
@@ -266,9 +263,11 @@ impl CursorFetcher {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
-                if !is_matching(&self.description.selector, &document) {
+                if !Matcher::is_matching(&self.description.selector, &document) {
                     return OK;
                 }
+
+                document = Projector::apply(self.description.options.projection.as_ref(), document);
 
                 self.documents.push(document.clone());
                 let id = extract_id(&mut document)?;
@@ -284,10 +283,12 @@ impl CursorFetcher {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
-                let is_matching = is_matching(&self.description.selector, &document);
+                let is_matching = Matcher::is_matching(&self.description.selector, &document);
                 if is_matching {
                     self.documents.push(document.clone());
                 }
+
+                document = Projector::apply(self.description.options.projection.as_ref(), document);
 
                 let id = extract_id(&mut document)?;
                 if is_matching {
