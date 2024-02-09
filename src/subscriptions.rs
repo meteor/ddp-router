@@ -4,7 +4,7 @@ use crate::mergebox::Mergebox;
 use anyhow::{anyhow, Error};
 use mongodb::Database;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{from_str, Value};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 use tokio::sync::Mutex;
@@ -50,7 +50,11 @@ impl Subscriptions {
         }
 
         // Parse.
-        let Some(Value::Array(descriptions)) = result else {
+        let Some(Value::String(descriptions)) = result else {
+            return Err(anyhow!("Incorrect format"));
+        };
+
+        let Value::Array(descriptions) = from_str(descriptions)? else {
             return Err(anyhow!("Incorrect format"));
         };
 

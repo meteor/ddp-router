@@ -1,5 +1,5 @@
 use crate::drop_handle::DropHandle;
-use crate::ejson::{from_ejson, into_ejson_document};
+use crate::ejson::into_ejson_document;
 use crate::matcher::{is_matching, is_supported};
 use crate::mergebox::{Mergebox, Mergeboxes};
 use anyhow::{anyhow, Error};
@@ -358,12 +358,7 @@ impl CursorFetcher {
         OK
     }
 
-    pub fn new(database: Database, mut description: CursorDescription) -> Self {
-        // Decode EJSON selector into a BSON one.
-        for (_, value) in description.selector.iter_mut() {
-            from_ejson(value);
-        }
-
+    pub fn new(database: Database, description: CursorDescription) -> Self {
         Self {
             database,
             description,

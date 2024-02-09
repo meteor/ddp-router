@@ -8,6 +8,9 @@
     * Meteor URL (defaults to `ws://127.0.0.1:3000/websocket`).
 1. Add the following code to your Meteor app:
     ```ts
+    import { Meteor } from 'meteor/meteor';
+    import { NpmModuleMongodb } from 'meteor/npm-mongo';
+
     const { publish } = Meteor;
     Meteor.publish = function publishWithDDPRouter(name, fn) {
       Meteor.methods({
@@ -20,7 +23,9 @@
               ? [maybeCursorOrCursors]
               : [];
           const cursorDescriptions = cursors.map(cursor => cursor._cursorDescription);
-          return cursorDescriptions;
+          // Use BSON's EJSON instead of Meteor's one and return a string to make
+          // sure the latter won't interfere.;
+          return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
         },
       });
 
@@ -61,8 +66,7 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
 ## Limitations and known issues
 
 * **No error handling.** All errors are logged and result in websocket termination.
-* **No real-time database updates.** The current implementation reruns the queries every second and checks them against the Mergebox.
-* **A visible memory leak.** This has to be investigated.
+* **A limited support for real-time database updates.** If DDP Router can fully understand the query (including its projection, sorting, etc.) then it'll runt a Change Stream. If not, it'll fall back to pooling instead.
 * **Collections with `ObjectId` in the `_id` field.** It looks like Meteor does not use `EJSON` for serializing the `_id` field, but DDP Router does. Instead of patching the DDP Router, patch the Meteor app using the following code:
     ```ts
     import { MongoID } from 'meteor/mongo-id';
