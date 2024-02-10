@@ -123,7 +123,7 @@ impl Mergebox {
         let mergebox_index = mergebox_collection
             .iter()
             .position(|x| x.id == id)
-            .ok_or_else(|| anyhow!("Document {id} not found"))?;
+            .ok_or_else(|| anyhow!("Document {id} not found in {collection}"))?;
         let cleared = mergebox_collection[mergebox_index].remove(document)?;
         if mergebox_collection[mergebox_index].count == 0 {
             mergebox_collection.swap_remove(mergebox_index);
@@ -176,7 +176,7 @@ impl Mergebox {
         let index = documents
             .iter()
             .position(|x| x.0 == id)
-            .ok_or_else(|| anyhow!("Document not found {id}"))?;
+            .ok_or_else(|| anyhow!("Document not found {id} in {collection}"))?;
         let document = documents.swap_remove(index).1;
         let mut document_applied = document.clone();
         for field in cleared.into_iter().flatten() {
@@ -202,7 +202,7 @@ impl Mergebox {
         let index = documents
             .iter()
             .position(|x| x.0 == id)
-            .ok_or_else(|| anyhow!("Document not found {id}"))?;
+            .ok_or_else(|| anyhow!("Document not found {id} in {collection}"))?;
         let document = documents.swap_remove(index).1;
 
         // Update `collections`.

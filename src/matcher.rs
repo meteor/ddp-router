@@ -1,38 +1,41 @@
 use crate::ejson::into_ejson;
+use crate::sorter::cmp_value;
 use bson::{Bson, Document};
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 
-fn is_equal(lhs: &Bson, rhs: &Value) -> bool {
+fn cmp(lhs: &Value, rhs: &Bson) -> Ordering {
     // TODO: This can be done faster by NOT using `into_ejson`.
-    into_ejson(lhs.clone()) == *rhs
+    cmp_value(lhs, &into_ejson(rhs.clone()))
+}
+
+fn is_equal(lhs: &Value, rhs: &Bson) -> bool {
+    // TODO: This can be done faster by NOT using `into_ejson`.
+    *lhs == into_ejson(rhs.clone())
 }
 
 pub fn is_matching(selector: &Document, document: &Map<String, Value>) -> bool {
-    selector.iter().all(|(key, selector)| {
-        match key.as_ref() {
-            "$and" => selector.as_array().is_some_and(|selectors| {
-                selectors.iter().all(|selector| {
-                    selector
-                        .as_document()
-                        .is_some_and(|selector| is_matching(selector, document))
-                })
-            }),
-            "$or" => selector.as_array().is_some_and(|selectors| {
-                selectors.iter().any(|selector| {
-                    selector
-                        .as_document()
-                        .is_some_and(|selector| is_matching(selector, document))
-                })
-            }),
-            // TODO: Implement other operators.
-            _ => is_matching_value(selector, document.get(key)),
-        }
+    selector.iter().all(|(key, selector)| match key.as_ref() {
+        key @ ("$and" | "$or") => selector.as_array().is_some_and(|selectors| {
+            let mut results = selectors.iter().map(|selector| {
+                selector
+                    .as_document()
+                    .is_some_and(|selector| is_matching(selector, document))
+            });
+
+            match key {
+                "$and" => results.all(|result| result),
+                "$or" => results.any(|result| result),
+                _ => unreachable!(),
+            }
+        }),
+        _ => is_matching_value(selector, document.get(key)),
     })
 }
 
 fn is_matching_document(selector: &Document, value: &Value) -> bool {
     match value {
-        Value::Array(value) => value
+        Value::Array(values) => values
             .iter()
             .any(|value| is_matching_document(selector, value)),
         Value::Object(value) => is_matching(selector, value),
@@ -42,31 +45,67 @@ fn is_matching_document(selector: &Document, value: &Value) -> bool {
 
 fn is_matching_value(selector: &Bson, value: Option<&Value>) -> bool {
     match selector {
-        Bson::Array(_) => value.is_some_and(|value| value.is_array() && is_equal(selector, value)),
-        Bson::Document(selector) => match keys(selector).as_slice() {
-            ["$eq"] => selector.get("$eq").is_some_and(|selector| match selector {
-                Bson::Document(_) => value.is_some_and(|value| is_equal(selector, value)),
-                _ => is_matching_value(selector, value),
-            }),
-            ["$in"] => selector.get_array("$in").is_ok_and(|selectors| {
-                selectors
-                    .iter()
-                    .any(|selector| is_matching_value(selector, value))
-            }),
-            ["$ne"] => selector.get("$ne").is_some_and(|selector| match selector {
-                Bson::Document(_) => value.map_or(true, |value| !is_equal(selector, value)),
-                _ => !is_matching_value(selector, value),
-            }),
-            // TODO: Implement other operators.
-            _ => value.is_some_and(|value| is_matching_document(selector, value)),
-        },
+        Bson::Array(_) => value.is_some_and(|value| value.is_array() && is_equal(value, selector)),
+        Bson::Document(selector) => {
+            let has_operator = selector.keys().any(|key| key.starts_with('$'));
+            if !has_operator {
+                return value.is_some_and(|value| is_matching_document(selector, value));
+            }
+
+            selector.iter().all(|(key, selector)| match key.as_ref() {
+                key @ ("$eq" | "$ne") => {
+                    let is_equal = match selector {
+                        Bson::Document(_) => value.is_some_and(|value| is_equal(value, selector)),
+                        _ => is_matching_value(selector, value),
+                    };
+
+                    match key {
+                        "$eq" => is_equal,
+                        "$ne" => !is_equal,
+                        _ => unreachable!(),
+                    }
+                }
+                key @ ("$gt" | "$gte" | "$lt" | "$lte") => {
+                    let values = match value {
+                        Some(Value::Array(values)) => values.iter().collect(),
+                        Some(value) => vec![value],
+                        None => vec![],
+                    };
+
+                    values.into_iter().any(|value| {
+                        let ordering = cmp(value, selector);
+                        match key {
+                            "$gt" => ordering.is_gt(),
+                            "$gte" => ordering.is_ge(),
+                            "$lt" => ordering.is_lt(),
+                            "$lte" => ordering.is_le(),
+                            _ => unreachable!(),
+                        }
+                    })
+                }
+                key @ ("$in" | "$nin") => {
+                    let is_in = selector.as_array().is_some_and(|selectors| {
+                        selectors
+                            .iter()
+                            .any(|selector| is_matching_value(selector, value))
+                    });
+
+                    match key {
+                        "$in" => is_in,
+                        "$nin" => !is_in,
+                        _ => unreachable!(),
+                    }
+                }
+                key => unreachable!("{key}"),
+            })
+        }
         Bson::Null if value.is_none() => true,
         Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Null | Bson::String(_) => value
             .is_some_and(|value| match value {
-                Value::Array(value) => value
+                Value::Array(values) => values
                     .iter()
                     .any(|value| is_matching_value(selector, Some(value))),
-                value => is_equal(selector, value),
+                value => is_equal(value, selector),
             }),
         _ => false,
     }
@@ -79,39 +118,28 @@ pub fn is_supported(selector: &Document) -> bool {
             return false;
         }
 
-        // TODO: Implement other operators.
-        if key.starts_with('$') {
-            return matches!(key.as_ref(), "$and" | "$or");
+        match key.as_ref() {
+            "$and" | "$or" => selector
+                .as_array()
+                .is_some_and(|selectors| selectors.iter().all(is_supported_value)),
+            key => !key.starts_with('$') && is_supported_value(selector),
         }
-
-        is_supported_value(selector)
     })
 }
 
 fn is_supported_value(selector: &Bson) -> bool {
     match selector {
         Bson::Array(selectors) => selectors.iter().all(is_supported_value),
-        Bson::Document(selector) => {
-            match keys(selector).as_slice() {
-                ["$eq"] => selector.get("$eq").is_some_and(is_supported_value),
-                ["$in"] => selector
-                    .get_array("$in")
-                    .is_ok_and(|selectors| selectors.iter().all(is_supported_value)),
-                ["$ne"] => selector.get("$ne").is_some_and(is_supported_value),
-                // TODO: Implement other value selectors.
-                _ => is_supported(selector),
-            }
-        }
+        Bson::Document(selector) => selector.iter().all(|(key, selector)| match key.as_ref() {
+            "$eq" | "$gt" | "$gte" | "$lt" | "$lte" | "$ne" => is_supported_value(selector),
+            "$in" | "$nin" => selector
+                .as_array()
+                .is_some_and(|selectors| selectors.iter().all(is_supported_value)),
+            key => !key.starts_with('$') && is_supported_value(selector),
+        }),
         Bson::Double(_) | Bson::Int32(_) | Bson::Int64(_) | Bson::Null | Bson::String(_) => true,
-        // TODO: Implement other selectors.
         _ => false,
     }
-}
-
-fn keys(document: &Document) -> Vec<&str> {
-    let mut keys: Vec<_> = document.keys().map(String::as_str).collect();
-    keys.sort_unstable();
-    keys
 }
 
 #[cfg(test)]
@@ -196,6 +224,21 @@ mod tests {
     y!(operator_and_6, {"$and": [{"a": 1}, {"b": 2}], "c": 3}, {"a": 1, "b": 2, "c": 3});
     n!(operator_and_7, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
 
+    // $gt.
+    y!(operator_gt_1, {"a": {"$gt": 10}}, {"a": 11});
+    n!(operator_gt_2, {"a": {"$gt": 10}}, {"a": 10});
+    n!(operator_gt_3, {"a": {"$gt": 10}}, {"a": 9});
+    y!(operator_gt_4, {"a": {"$gt": {"x": [2, 3, 4]}}}, {"a": {"x": [3, 3, 4]}});
+    n!(operator_gt_5, {"a": {"$gt": {"x": [2, 3, 4]}}}, {"a": {"x": [1, 3, 4]}});
+    n!(operator_gt_6, {"a": {"$gt": {"x": [2, 3, 4]}}}, {"a": {"x": [2, 3, 4]}});
+    n!(operator_gt_7, {"a": {"$gt": [2, 3]}}, {"a": [1, 2]});
+
+    // $gte.
+    y!(operator_gte_1, {"a": {"$gte": 10}}, {"a": 11});
+    y!(operator_gte_2, {"a": {"$gte": 10}}, {"a": 10});
+    n!(operator_gte_3, {"a": {"$gte": 10}}, {"a": 9});
+    y!(operator_gte_4, {"a": {"$gte": {"x": [2, 3, 4]}}}, {"a": {"x": [2, 3, 4]}});
+
     // $in.
     y!(operator_in_01, {"a": {"$in": [1, 2, 3]}}, {"a": 2});
     n!(operator_in_02, {"a": {"$in": [1, 2, 3]}}, {"a": 4});
@@ -222,6 +265,22 @@ mod tests {
     n!(operator_eq_09, {"a": {"$eq": {"x": 1}}}, {"a": {"x": 2}});
     n!(operator_eq_10, {"a": {"$eq": {"x": 1}}}, {"a": {"x": 1, "y": 2}});
 
+    // $lt.
+    y!(operator_lt_1, {"a": {"$lt": 10}}, {"a": 9});
+    n!(operator_lt_2, {"a": {"$lt": 10}}, {"a": 10});
+    n!(operator_lt_3, {"a": {"$lt": 10}}, {"a": 11});
+    y!(operator_lt_4, {"a": {"$lt": 10}}, {"a": [11, 9, 12]});
+    n!(operator_lt_5, {"a": {"$lt": 10}}, {"a": [11, 12]});
+    n!(operator_lt_6, {"a": {"$lt": "null"}}, {"a": null});
+    y!(operator_lt_7, {"a": {"$lt": {"x": [2, 3, 4]}}}, {"a": {"x": [1, 3, 4]}});
+    n!(operator_lt_8, {"a": {"$lt": {"x": [2, 3, 4]}}}, {"a": {"x": [2, 3, 4]}});
+
+    // $lte.
+    y!(operator_lte_1, {"a": {"$lte": 10}}, {"a": 9});
+    y!(operator_lte_2, {"a": {"$lte": 10}}, {"a": 10});
+    n!(operator_lte_3, {"a": {"$lte": 10}}, {"a": 11});
+    y!(operator_lte_4, {"a": {"$lte": {"x": [2, 3, 4]}}}, {"a": {"x": [2, 3, 4]}});
+
     // $ne.
     y!(operator_ne_01, {"a": {"$ne": 1}}, {"a": 2});
     n!(operator_ne_02, {"a": {"$ne": 2}}, {"a": 2});
@@ -233,6 +292,20 @@ mod tests {
     n!(operator_ne_08, {"a": {"$ne": {"x": 1}}}, {"a": {"x": 1}});
     y!(operator_ne_09, {"a": {"$ne": {"x": 1}}}, {"a": {"x": 2}});
     y!(operator_ne_10, {"a": {"$ne": {"x": 1}}}, {"a": {"x": 1, "y": 2}});
+
+    // $nin.
+    n!(operator_nin_01, {"a": {"$nin": [1, 2, 3]}}, {"a": 2});
+    y!(operator_nin_02, {"a": {"$nin": [1, 2, 3]}}, {"a": 4});
+    n!(operator_nin_03, {"a": {"$nin": [[1], [2], [3]]}}, {"a": [2]});
+    y!(operator_nin_04, {"a": {"$nin": [[1], [2], [3]]}}, {"a": [4]});
+    n!(operator_nin_05, {"a": {"$nin": [{"b": 1}, {"b": 2}, {"b": 3}]}}, {"a": {"b": 2}});
+    y!(operator_nin_06, {"a": {"$nin": [{"b": 1}, {"b": 2}, {"b": 3}]}}, {"a": {"b": 4}});
+    n!(operator_nin_07, {"a": {"$nin": [1, 2, 3]}}, {"a": [2]});
+    n!(operator_nin_08, {"a": {"$nin": [{"b": 1}, {"b": 2}, {"b": 3}]}}, {"a": [{"b": 2}]});
+    n!(operator_nin_09, {"a": {"$nin": [1, 2, 3]}}, {"a": [4, 2]});
+    y!(operator_nin_10, {"a": {"$nin": [1, 2, 3]}}, {"a": [4]});
+    n!(operator_nin_11, {"a": {"$nin": [1, null]}}, {});
+    n!(operator_nin_12, {"a": {"$nin": [1, null]}}, {"a": null});
 
     // $or.
     y!(operator_or_01, {"$or": [{"a": 1}]}, {"a": 1});
@@ -267,6 +340,15 @@ mod tests {
     y!(operators_and_ne_3, {"$and": [{"a": {"$ne": 1}}]}, {"a": 2});
     n!(operators_and_ne_4, {"$and": [{"a": {"$ne": 1}}, {"a": {"$ne": 2}}]}, {"a": 2});
     y!(operators_and_ne_5, {"$and": [{"a": {"$ne": 1}}, {"a": {"$ne": 3}}]}, {"a": 2});
+
+    // $gt + $lt.
+    n!(operator_gt_lt_1, {"a": {"$lt": 11, "$gt": 9}}, {"a": 8});
+    n!(operator_gt_lt_2, {"a": {"$lt": 11, "$gt": 9}}, {"a": 9});
+    y!(operator_gt_lt_3, {"a": {"$lt": 11, "$gt": 9}}, {"a": 10});
+    n!(operator_gt_lt_4, {"a": {"$lt": 11, "$gt": 9}}, {"a": 11});
+    n!(operator_gt_lt_5, {"a": {"$lt": 11, "$gt": 9}}, {"a": 12});
+    y!(operator_gt_lt_6, {"a": {"$lt": 11, "$gt": 9}}, {"a": [8, 9, 10, 11, 12]});
+    y!(operator_gt_lt_7, {"a": {"$lt": 11, "$gt": 9}}, {"a": [8, 9, 11, 12]});
 
     // $in + $or.
     y!(operators_in_or_1, {"$or": [{"a": {"$in": [1, 2, 3]}}]}, {"a": 1});

@@ -7,6 +7,7 @@ mod matcher;
 mod mergebox;
 mod projector;
 mod session;
+mod sorter;
 mod subscriptions;
 
 use crate::subscriptions::Subscriptions;

@@ -3,6 +3,7 @@ use crate::ejson::into_ejson_document;
 use crate::matcher as Matcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::projector as Projector;
+use crate::sorter as Sorter;
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
 use futures_util::{FutureExt, StreamExt, TryStreamExt};
@@ -180,7 +181,6 @@ impl CursorFetcher {
             return Ok(None);
         }
 
-        // TODO: Implement MongoDB projections.
         if !Projector::is_supported(options.projection.as_ref()) {
             println!(
                 "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection not supported\x1b[0m ({:?})",
@@ -189,9 +189,17 @@ impl CursorFetcher {
             return Ok(None);
         }
 
-        // TODO: Implement MongoDB sorting.
-        if options.limit.is_some() || options.skip.is_some() || options.sort.is_some() {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31moptions not supported\x1b[0m ({options:?})");
+        if !Sorter::is_supported(options.sort.as_ref()) {
+            println!(
+                "\x1b[0;32mmongo\x1b[0m \x1b[0;31msort not supported\x1b[0m ({:?})",
+                options.sort
+            );
+            return Ok(None);
+        }
+
+        // TODO: Implement top-N logic.
+        if options.limit.is_some() || options.skip.is_some() {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit and skip are not supported\x1b[0m");
             return Ok(None);
         }
 
@@ -235,7 +243,9 @@ impl CursorFetcher {
                     .documents
                     .iter()
                     .position(|x| x.get("_id") == Some(&id))
-                    .ok_or_else(|| anyhow!("Document {id} not found"))?;
+                    .ok_or_else(|| {
+                        anyhow!("Document {id} not found in {}", self.description.collection)
+                    })?;
                 let mut document = self.documents.swap_remove(index);
                 document.remove("_id");
                 mergeboxes
