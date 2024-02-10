@@ -65,6 +65,9 @@ fn is_matching_value(selector: &Bson, value: Option<&Value>) -> bool {
                         _ => unreachable!(),
                     }
                 }
+                "$exists" => selector
+                    .as_bool()
+                    .is_some_and(|exists| exists == value.is_some()),
                 key @ ("$gt" | "$gte" | "$lt" | "$lte") => {
                     let values = match value {
                         Some(Value::Array(values)) => values.iter().collect(),
@@ -132,6 +135,7 @@ fn is_supported_value(selector: &Bson) -> bool {
         Bson::Array(selectors) => selectors.iter().all(is_supported_value),
         Bson::Document(selector) => selector.iter().all(|(key, selector)| match key.as_ref() {
             "$eq" | "$gt" | "$gte" | "$lt" | "$lte" | "$ne" => is_supported_value(selector),
+            "$exists" => matches!(selector, Bson::Boolean(_)),
             "$in" | "$nin" => selector
                 .as_array()
                 .is_some_and(|selectors| selectors.iter().all(is_supported_value)),
@@ -223,6 +227,20 @@ mod tests {
     n!(operator_and_5, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1, "b": 2});
     y!(operator_and_6, {"$and": [{"a": 1}, {"b": 2}], "c": 3}, {"a": 1, "b": 2, "c": 3});
     n!(operator_and_7, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
+
+    // $exists.
+    y!(operator_exists_01, {"a": {"$exists": true}}, {"a": 12});
+    n!(operator_exists_02, {"a": {"$exists": true}}, {"b": 12});
+    n!(operator_exists_03, {"a": {"$exists": false}}, {"a": 12});
+    y!(operator_exists_04, {"a": {"$exists": false}}, {"b": 12});
+    y!(operator_exists_05, {"a": {"$exists": true}}, {"a": []});
+    n!(operator_exists_06, {"a": {"$exists": true}}, {"b": []});
+    n!(operator_exists_07, {"a": {"$exists": false}}, {"a": []});
+    y!(operator_exists_08, {"a": {"$exists": false}}, {"b": []});
+    y!(operator_exists_09, {"a": {"$exists": true}}, {"a": [1]});
+    n!(operator_exists_10, {"a": {"$exists": true}}, {"b": [1]});
+    n!(operator_exists_11, {"a": {"$exists": false}}, {"a": [1]});
+    y!(operator_exists_12, {"a": {"$exists": false}}, {"b": [1]});
 
     // $gt.
     y!(operator_gt_1, {"a": {"$gt": 10}}, {"a": 11});
