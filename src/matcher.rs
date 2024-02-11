@@ -423,16 +423,6 @@ fn one_or_wrap<T>(mut list: Vec<T>, wrap: impl Fn(Vec<T>) -> T) -> T {
     }
 }
 
-pub fn is_matching(selector: &Document, document: &Map<String, Value>) -> bool {
-    DocumentMatcher::compile(selector)
-        .unwrap()
-        .matches(document)
-}
-
-pub fn is_supported(selector: &Document) -> bool {
-    DocumentMatcher::compile(selector).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::DocumentMatcher;

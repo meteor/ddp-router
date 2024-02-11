@@ -1,6 +1,6 @@
 use crate::drop_handle::DropHandle;
 use crate::ejson::into_ejson_document;
-use crate::matcher as Matcher;
+use crate::matcher::DocumentMatcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::projector as Projector;
 use crate::sorter as Sorter;
@@ -160,11 +160,12 @@ pub struct CursorFetcher {
     database: Database,
     description: CursorDescription,
     documents: Vec<Map<String, Value>>,
+    matcher: Option<DocumentMatcher>,
 }
 
 impl CursorFetcher {
     async fn create_change_stream(
-        &self,
+        &mut self,
     ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
         let CursorDescription {
             collection,
@@ -174,12 +175,15 @@ impl CursorFetcher {
 
         // We have to understand the selector to process the Change Stream
         // events correctly.
-        if !Matcher::is_supported(selector) {
-            println!(
-                "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector not supported\x1b[0m ({selector:?})"
-            );
-            return Ok(None);
-        }
+        match DocumentMatcher::compile(selector) {
+            Ok(matcher) => self.matcher = Some(matcher),
+            Err(error) => {
+                println!(
+                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector ({selector:?}) is not supported: {error}\x1b[0m"
+                );
+                return Ok(None);
+            }
+        };
 
         if !Projector::is_supported(options.projection.as_ref()) {
             println!(
@@ -273,7 +277,7 @@ impl CursorFetcher {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
-                if !Matcher::is_matching(&self.description.selector, &document) {
+                if !self.matcher.as_ref().unwrap().matches(&document) {
                     return OK;
                 }
 
@@ -293,7 +297,7 @@ impl CursorFetcher {
                 ..
             } => {
                 let mut document = into_ejson_document(document);
-                let is_matching = Matcher::is_matching(&self.description.selector, &document);
+                let is_matching = self.matcher.as_ref().unwrap().matches(&document);
                 if is_matching {
                     self.documents.push(document.clone());
                 }
@@ -374,6 +378,7 @@ impl CursorFetcher {
             database,
             description,
             documents: Vec::default(),
+            matcher: None,
         }
     }
 }
