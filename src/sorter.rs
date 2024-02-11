@@ -26,19 +26,22 @@ pub fn cmp_document(
         })
 }
 
-pub fn cmp_value(lhs: &Value, rhs: &Value) -> Ordering {
-    match (lhs, rhs) {
+pub fn cmp_value_partial(lhs: &Value, rhs: &Value) -> Result<Ordering, Ordering> {
+    Ok(match (lhs, rhs) {
         (Value::Array(lhs), Value::Array(rhs)) => {
             let ordering = lhs.len().cmp(&rhs.len());
             if ordering.is_ne() {
-                return ordering;
+                return Ok(ordering);
             }
 
-            lhs.iter()
-                .zip(rhs.iter())
-                .fold(Ordering::Equal, |ordering, (lhs, rhs)| {
-                    ordering.then_with(|| cmp_value(lhs, rhs))
-                })
+            for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+                let ordering = cmp_value_partial(lhs, rhs)?;
+                if ordering.is_ne() {
+                    return Ok(ordering);
+                }
+            }
+
+            Ordering::Equal
         }
         (Value::Bool(lhs), Value::Bool(rhs)) => lhs.cmp(rhs),
         (Value::Null, Value::Null) => Ordering::Equal,
@@ -49,20 +52,45 @@ pub fn cmp_value(lhs: &Value, rhs: &Value) -> Ordering {
         (Value::Object(lhs), Value::Object(rhs)) => {
             let ordering = lhs.len().cmp(&rhs.len());
             if ordering.is_ne() {
-                return ordering;
+                return Ok(ordering);
             }
 
             // TODO: Is it OK for BSON-specific types encoded as EJSON?
-            lhs.iter()
-                .zip(rhs.iter())
-                .fold(Ordering::Equal, |ordering, (lhs, rhs)| {
-                    ordering
-                        .then_with(|| lhs.0.cmp(rhs.0))
-                        .then_with(|| cmp_value(lhs.1, rhs.1))
-                })
+            for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
+                let ordering = lhs.0.cmp(rhs.0);
+                if ordering.is_ne() {
+                    return Ok(ordering);
+                }
+
+                let ordering = cmp_value_partial(lhs.1, rhs.1)?;
+                if ordering.is_ne() {
+                    return Ok(ordering);
+                }
+            }
+
+            Ordering::Equal
         }
         (Value::String(lhs), Value::String(rhs)) => lhs.cmp(rhs),
-        _ => Ordering::Equal,
+        (lhs, rhs) => return Err(cmp_value_order(lhs).cmp(&cmp_value_order(rhs))),
+    })
+}
+
+pub fn cmp_value(lhs: &Value, rhs: &Value) -> Ordering {
+    match cmp_value_partial(lhs, rhs) {
+        Ok(ordering) | Err(ordering) => ordering,
+    }
+}
+
+/// <https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/>
+fn cmp_value_order(value: &Value) -> usize {
+    match value {
+        Value::Null => 2,
+        Value::Number(_) => 3,
+        Value::String(_) => 4,
+        // TODO: Handle `BinData`, `Date`, `ObjectId`, `RegularExpression`, and `Timestamp`.
+        Value::Object(_) => 5,
+        Value::Array(_) => 6,
+        Value::Bool(_) => 9,
     }
 }
 
