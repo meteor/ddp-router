@@ -426,17 +426,15 @@ fn one_or_wrap<T>(mut list: Vec<T>, wrap: impl Fn(Vec<T>) -> T) -> T {
 #[cfg(test)]
 mod tests {
     use super::DocumentMatcher;
-    use bson::doc;
-    use serde_json::{json, Value};
+    use crate::ejson::into_ejson_document;
+    use bson::{doc, DateTime};
 
     macro_rules! test {
         ($name:ident, { $($selector:tt)* }, { $($document:tt)* }, $expected:expr) => {
             #[test]
             fn $name() {
                 let selector = &doc! { $($selector)* };
-                let document = json! {{ $($document)* }};
-
-                let Value::Object(document) = document else { unreachable!() };
+                let document = &into_ejson_document(doc! { $($document)* });
 
                 let matcher = match DocumentMatcher::compile(selector) {
                     Ok(matcher) => matcher,
@@ -444,7 +442,7 @@ mod tests {
                 };
 
                 assert!(
-                    matcher.matches(&document) == $expected,
+                    matcher.matches(document) == $expected,
                     "{selector:?} should{} match {document:?} but does{}",
                     if $expected { "" } else { "n't" },
                     if $expected { "n't" } else { "" },
@@ -507,6 +505,25 @@ mod tests {
     y!(string_12, {"a": "foo"}, {"a": ["foo", "bar"]});
     y!(string_13, {"a": "foo"}, {"a": ["bar", "foo"]});
     y!(string_14, {"a": "foo"}, {"a": ["foo", "foo"]});
+
+    // Date.
+    y!(date_01, {"a": DateTime::MIN}, {"a": DateTime::MIN});
+    n!(date_02, {"a": DateTime::MIN}, {"a": DateTime::MAX});
+    n!(date_03, {"a": DateTime::MIN}, {"a": DateTime::from_millis(0)});
+    n!(date_04, {"a": DateTime::MAX}, {"a": DateTime::MIN});
+    y!(date_05, {"a": DateTime::MAX}, {"a": DateTime::MAX});
+    n!(date_06, {"a": DateTime::MAX}, {"a": DateTime::from_millis(0)});
+    n!(date_07, {"a": DateTime::from_millis(0)}, {"a": DateTime::MIN});
+    n!(date_08, {"a": DateTime::from_millis(0)}, {"a": DateTime::MAX});
+    y!(date_09, {"a": DateTime::from_millis(0)}, {"a": DateTime::from_millis(0)});
+    n!(date_10, {"a": {"$gt": DateTime::from_millis(0)}}, {"a": DateTime::MIN});
+    n!(date_11, {"a": {"$gte": DateTime::from_millis(0)}}, {"a": DateTime::MIN});
+    y!(date_12, {"a": {"$lt": DateTime::from_millis(0)}}, {"a": DateTime::MIN});
+    y!(date_13, {"a": {"$lte": DateTime::from_millis(0)}}, {"a": DateTime::MIN});
+    y!(date_14, {"a": {"$gt": DateTime::from_millis(0)}}, {"a": DateTime::MAX});
+    y!(date_15, {"a": {"$gte": DateTime::from_millis(0)}}, {"a": DateTime::MAX});
+    n!(date_16, {"a": {"$lt": DateTime::from_millis(0)}}, {"a": DateTime::MAX});
+    n!(date_17, {"a": {"$lte": DateTime::from_millis(0)}}, {"a": DateTime::MAX});
 
     // Nested paths.
     y!(nested_01, {"a.b": 1}, {"a": {"b": 1}});

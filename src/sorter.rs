@@ -27,6 +27,12 @@ pub fn cmp_document(
 }
 
 pub fn cmp_value_partial(lhs: &Value, rhs: &Value) -> Result<Ordering, Ordering> {
+    let lhs_type = value_type(lhs);
+    let rhs_type = value_type(rhs);
+    if lhs_type != rhs_type {
+        return Err(value_type_order(lhs_type).cmp(&value_type_order(rhs_type)));
+    }
+
     Ok(match (lhs, rhs) {
         (Value::Array(lhs), Value::Array(rhs)) => {
             let ordering = lhs.len().cmp(&rhs.len());
@@ -71,7 +77,7 @@ pub fn cmp_value_partial(lhs: &Value, rhs: &Value) -> Result<Ordering, Ordering>
             Ordering::Equal
         }
         (Value::String(lhs), Value::String(rhs)) => lhs.cmp(rhs),
-        (lhs, rhs) => return Err(cmp_value_order(lhs).cmp(&cmp_value_order(rhs))),
+        _ => unreachable!(),
     })
 }
 
@@ -81,16 +87,56 @@ pub fn cmp_value(lhs: &Value, rhs: &Value) -> Ordering {
     }
 }
 
-/// <https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/>
-fn cmp_value_order(value: &Value) -> usize {
+// TODO: It coerces all numbers into `1`, just like Meteor. It would be better
+// to support `double`, `int`, `long`, and `decimal` separately.
+/// <https://www.mongodb.com/docs/manual/reference/operator/query/type/#available-types>
+fn value_type(value: &Value) -> i8 {
     match value {
-        Value::Null => 2,
-        Value::Number(_) => 3,
-        Value::String(_) => 4,
-        // TODO: Handle `BinData`, `Date`, `ObjectId`, `RegularExpression`, and `Timestamp`.
-        Value::Object(_) => 5,
-        Value::Array(_) => 6,
-        Value::Bool(_) => 9,
+        Value::Array(_) => 4,
+        Value::Bool(_) => 8,
+        Value::Null => 10,
+        Value::Number(_) => 1,
+        Value::Object(object) => {
+            let mut keys: Vec<_> = object.keys().map(String::as_str).collect();
+            if keys.len() <= 2 {
+                keys.sort_unstable();
+                match keys.as_slice() {
+                    ["$InfNaN"] => return 1,
+                    ["$binary"] => return 5,
+                    ["$date"] => return 9,
+                    ["$regexp", "$flags"] => return 11,
+                    ["$type", "$value"] => match object.get("$type").and_then(Value::as_str) {
+                        Some("Decimal") => return 1,
+                        Some("oid") => return 7,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+
+            3
+        }
+        Value::String(_) => 2,
+    }
+}
+
+/// <https://www.mongodb.com/docs/manual/reference/bson-type-comparison-order/>
+fn value_type_order(value_type: i8) -> u8 {
+    match value_type {
+        -1 => 0,
+        10 => 1,
+        1 | 16 | 18 | 19 => 2,
+        2 | 14 => 3,
+        3 => 4,
+        4 => 5,
+        5 => 6,
+        7 => 7,
+        8 => 8,
+        9 => 9,
+        17 => 10,
+        11 => 11,
+        127 => 12,
+        _ => unreachable!(),
     }
 }
 
