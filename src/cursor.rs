@@ -2,7 +2,7 @@ use crate::drop_handle::DropHandle;
 use crate::ejson::into_ejson_document;
 use crate::matcher::DocumentMatcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
-use crate::projector as Projector;
+use crate::projector::Projector;
 use crate::sorter as Sorter;
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
@@ -161,6 +161,7 @@ pub struct CursorFetcher {
     description: CursorDescription,
     documents: Vec<Map<String, Value>>,
     matcher: Option<DocumentMatcher>,
+    projector: Option<Projector>,
 }
 
 impl CursorFetcher {
@@ -185,12 +186,15 @@ impl CursorFetcher {
             }
         };
 
-        if !Projector::is_supported(options.projection.as_ref()) {
-            println!(
-                "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection not supported\x1b[0m ({:?})",
-                options.projection
-            );
-            return Ok(None);
+        match Projector::compile(options.projection.as_ref()) {
+            Ok(projector) => self.projector = Some(projector),
+            Err(error) => {
+                println!(
+                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection ({:?}) is not supported: {error}\x1b[0m",
+                    options.projection,
+                );
+                return Ok(None);
+            }
         }
 
         if !Sorter::is_supported(options.sort.as_ref()) {
@@ -281,7 +285,7 @@ impl CursorFetcher {
                     return OK;
                 }
 
-                document = Projector::apply(self.description.options.projection.as_ref(), document);
+                document = self.projector.as_ref().unwrap().apply(document);
 
                 self.documents.push(document.clone());
                 let id = extract_id(&mut document)?;
@@ -302,7 +306,7 @@ impl CursorFetcher {
                     self.documents.push(document.clone());
                 }
 
-                document = Projector::apply(self.description.options.projection.as_ref(), document);
+                document = self.projector.as_ref().unwrap().apply(document);
 
                 let id = extract_id(&mut document)?;
                 if is_matching {
@@ -379,6 +383,7 @@ impl CursorFetcher {
             description,
             documents: Vec::default(),
             matcher: None,
+            projector: None,
         }
     }
 }

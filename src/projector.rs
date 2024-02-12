@@ -1,37 +1,91 @@
+use anyhow::{anyhow, Error};
 use bson::{Bson, Document};
 use serde_json::{Map, Value};
 
-pub fn apply(projection: Option<&Document>, document: Map<String, Value>) -> Map<String, Value> {
-    let Some(projection) = projection else {
-        return document;
-    };
-
-    document
-        .into_iter()
-        .filter(|(field, _)| projection.contains_key(field) || field == "_id")
-        .collect()
+pub enum Projector {
+    Empty,
+    Exclude(Vec<String>),
+    Include(Vec<String>),
 }
 
-pub fn is_supported(projection: Option<&Document>) -> bool {
-    let Some(projection) = projection else {
-        return true;
-    };
+impl Projector {
+    pub fn apply(&self, mut document: Map<String, Value>) -> Map<String, Value> {
+        match self {
+            Self::Empty => document,
+            Self::Exclude(paths) => {
+                document.retain(|key, _| paths.binary_search(key).is_err());
+                document
+            }
+            Self::Include(paths) => {
+                document.retain(|key, _| paths.binary_search(key).is_ok());
+                document
+            }
+        }
+    }
 
-    projection.iter().all(|(key, projection)| {
-        // TODO: Implement nested keys.
-        if key.contains('.') {
-            return false;
+    pub fn compile(projection: Option<&Document>) -> Result<Self, Error> {
+        let Some(projection) = projection else {
+            return Ok(Self::Empty);
+        };
+
+        let mut paths = vec![];
+        let mut include_all = None;
+        let mut include_id = None;
+
+        for (path, operator) in projection {
+            let include = match operator {
+                Bson::Int32(1) => true,
+                Bson::Int32(0) => false,
+                operator => {
+                    return Err(anyhow!("Projection {operator} for {path} is not supported"))
+                }
+            };
+
+            // _id is special.
+            if path == "_id" {
+                include_id = Some(include);
+                continue;
+            }
+
+            if path.contains('.') {
+                return Err(anyhow!("Nested projections are not supported"));
+            }
+
+            match include_all {
+                Some(include_all) => {
+                    if include_all != include {
+                        return Err(anyhow!("Projection cannot be both exclusive and inclusive"));
+                    }
+                }
+                None => include_all = Some(include),
+            }
+
+            paths.push(path.clone());
         }
 
-        // TODO: Implement operators.
-        // TODO: Implement field exclusions.
-        *projection == Bson::Int32(1)
-    })
+        match (include_all, include_id) {
+            (Some(true), None) => include_id = Some(true),
+            (None, include_id) => include_all = include_id,
+            _ => {}
+        }
+
+        if include_all == include_id {
+            paths.push("_id".to_owned());
+        }
+
+        paths.sort_unstable();
+
+        Ok(match include_all {
+            Some(true) => Self::Include(paths),
+            Some(false) => Self::Exclude(paths),
+            None => Self::Empty,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, is_supported};
+    use super::Projector;
     use bson::doc;
     use serde_json::{json, Value};
 
@@ -47,14 +101,29 @@ mod tests {
                 let Value::Object(input) = input else { unreachable!() };
                 let Value::Object(output) = output else { unreachable!() };
 
-                assert!(is_supported(projection), "{projection:?} is not supported");
-                assert_eq!(apply(projection, input), output);
+                let projector = match Projector::compile(projection) {
+                    Ok(projector) => projector,
+                    Err(error) => panic!("{projection:?} is not supported: {error:?}"),
+                };
+
+                assert_eq!(projector.apply(input), output);
             }
         };
     }
 
+    test!(empty, {}, {"a": 7, "b": 8}, {"a": 7, "b": 8});
+
+    test!(exclude_1, {"a": 0}, {}, {});
+    test!(exclude_2, {"a": 0}, {"a": 7}, {});
+    test!(exclude_3, {"a": 0}, {"a": 7, "b": 8}, {"b": 8});
+    test!(exclude_4, {"a": 0}, {"a": 7, "b": 8, "_id": 9}, {"b": 8, "_id": 9});
+    test!(exclude_5, {"a": 0, "_id": 0}, {"a": 7, "b": 8, "_id": 9}, {"b": 8});
+    test!(exclude_6, {"a": 0, "_id": 1}, {"a": 7, "b": 8, "_id": 9}, {"b": 8, "_id": 9});
+
     test!(include_1, {"a": 1}, {}, {});
     test!(include_2, {"a": 1}, {"a": 7}, {"a": 7});
-    test!(include_3, {"a": 1}, {"a": 7, "b": 9}, {"a": 7});
-    test!(include_4, {"a": 1}, {"a": 7, "_id": 9}, {"a": 7, "_id": 9});
+    test!(include_3, {"a": 1}, {"a": 7, "b": 8}, {"a": 7});
+    test!(include_4, {"a": 1}, {"a": 7, "b": 8, "_id": 9}, {"a": 7, "_id": 9});
+    test!(include_5, {"a": 1, "_id": 0}, {"a": 7, "b": 8, "_id": 9}, {"a": 7});
+    test!(include_6, {"a": 1, "_id": 1}, {"a": 7, "b": 8, "_id": 9}, {"a": 7, "_id": 9});
 }
