@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use crate::ejson::into_ejson;
-use crate::sorter::{cmp_value, cmp_value_partial};
+use crate::sorter::{cmp_value, cmp_value_partial, value_type};
 use anyhow::{anyhow, Error};
 use bson::{Bson, Document};
 use serde_json::{Map, Value};
@@ -176,6 +176,34 @@ impl BranchedMatcher {
 
                 Ok(ElementMatcher::Size(size).into_branched(true, false))
             }
+            "$type" => {
+                let type_ = match operand {
+                    Bson::Int32(operand) => match operand {
+                        1..=5 | 7..=11 => *operand as i8,
+                        operand => return Err(anyhow!("$type got an unknown number: {operand}")),
+                    },
+                    Bson::String(operand) => match operand.as_str() {
+                        "double" => 1,
+                        "string" => 2,
+                        "object" => 3,
+                        "array" => 4,
+                        "binData" => 5,
+                        "objectId" => 7,
+                        "bool" => 8,
+                        "date" => 9,
+                        "null" => 10,
+                        "regex" => 11,
+                        operand => return Err(anyhow!("$type got an unknown string: {operand}")),
+                    },
+                    operand => {
+                        return Err(anyhow!(
+                            "$type expected a number or string, got {operand:?}"
+                        ))
+                    }
+                };
+
+                Ok(ElementMatcher::Type(type_).into_branched(false, true))
+            }
             operator => Err(anyhow!("{operator} is not supported")),
         }
     }
@@ -237,6 +265,7 @@ enum ElementMatcher {
         is_negated: bool,
     },
     Size(usize),
+    Type(i8),
     Value(Value),
 }
 
@@ -276,6 +305,9 @@ impl ElementMatcher {
             Self::Size(size) => maybe_value
                 .and_then(Value::as_array)
                 .is_some_and(|array| array.len() == *size),
+            Self::Type(type_) => maybe_value
+                .map(value_type)
+                .is_some_and(|value_type| value_type == *type_),
             Self::Value(Value::Null) => maybe_value.map_or(true, Value::is_null),
             Self::Value(selector) => {
                 maybe_value.is_some_and(|value| cmp_value(selector, value).is_eq())
@@ -427,7 +459,8 @@ fn one_or_wrap<T>(mut list: Vec<T>, wrap: impl Fn(Vec<T>) -> T) -> T {
 mod tests {
     use super::DocumentMatcher;
     use crate::ejson::into_ejson_document;
-    use bson::{doc, DateTime};
+    use bson::oid::ObjectId;
+    use bson::{doc, Binary, DateTime, Regex};
 
     macro_rules! test {
         ($name:ident, { $($selector:tt)* }, { $($document:tt)* }, $expected:expr) => {
@@ -750,6 +783,64 @@ mod tests {
     n!(operator_size_08, {"a": {"$size": 1}}, {"a": "2"});
     n!(operator_size_09, {"a": {"$size": 2}}, {"a": "2"});
     n!(operator_size_10, {"a": {"$size": 2}}, {"a": [[2, 2]]});
+
+    // $type.
+    y!(operator_type_1, {"a": {"$type": 1}}, {"a": 1.1});
+    y!(operator_type_2, {"a": {"$type": "double"}}, {"a": 1.1});
+    y!(operator_type_3, {"a": {"$type": 1}}, {"a": 1});
+    n!(operator_type_4, {"a": {"$type": 1}}, {"a": "1"});
+    y!(operator_type_5, {"a": {"$type": 2}}, {"a": "1"});
+    y!(operator_type_6, {"a": {"$type": "string"}}, {"a": "1"});
+    n!(operator_type_7, {"a": {"$type": 2}}, {"a": 1});
+    y!(operator_type_8, {"a": {"$type": 3}}, {"a": {}});
+    y!(operator_type_9, {"a": {"$type": "object"}}, {"a": {}});
+    y!(operator_type_10, {"a": {"$type": 3}}, {"a": {"b": 2}});
+    n!(operator_type_11, {"a": {"$type": 3}}, {"a": []});
+    n!(operator_type_12, {"a": {"$type": 3}}, {"a": [1]});
+    n!(operator_type_13, {"a": {"$type": 3}}, {"a": null});
+    y!(operator_type_14, {"a": {"$type": 5}}, {"a": Binary::from_base64("", None).unwrap()});
+    y!(operator_type_15, {"a": {"$type": "binData"}}, {"a": Binary::from_base64("", None).unwrap()});
+    y!(operator_type_16, {"a": {"$type": 5}}, {"a": Binary::from_base64("", None).unwrap()});
+    n!(operator_type_17, {"a": {"$type": 5}}, {"a": []});
+    n!(operator_type_18, {"a": {"$type": 5}}, {"a": [42]});
+    y!(operator_type_19, {"a": {"$type": 7}}, {"a": ObjectId::new()});
+    y!(operator_type_20, {"a": {"$type": "objectId"}}, {"a": ObjectId::new()});
+    n!(operator_type_21, {"a": {"$type": 7}}, {"a": "1234567890abcd1234567890"});
+    y!(operator_type_22, {"a": {"$type": 8}}, {"a": true});
+    y!(operator_type_23, {"a": {"$type": "bool"}}, {"a": true});
+    y!(operator_type_24, {"a": {"$type": 8}}, {"a": false});
+    n!(operator_type_25, {"a": {"$type": 8}}, {"a": "true"});
+    n!(operator_type_26, {"a": {"$type": 8}}, {"a": 0});
+    n!(operator_type_27, {"a": {"$type": 8}}, {"a": null});
+    n!(operator_type_28, {"a": {"$type": 8}}, {"a": ""});
+    n!(operator_type_29, {"a": {"$type": 8}}, {});
+    y!(operator_type_30, {"a": {"$type": 9}}, {"a": DateTime::from_millis(0)});
+    y!(operator_type_31, {"a": {"$type": "date"}}, {"a": DateTime::from_millis(0)});
+    n!(operator_type_32, {"a": {"$type": 9}}, {"a": 0});
+    y!(operator_type_33, {"a": {"$type": 10}}, {"a": null});
+    y!(operator_type_34, {"a": {"$type": "null"}}, {"a": null});
+    n!(operator_type_35, {"a": {"$type": 10}}, {"a": false});
+    n!(operator_type_36, {"a": {"$type": 10}}, {"a": ""});
+    n!(operator_type_37, {"a": {"$type": 10}}, {"a": 0});
+    n!(operator_type_38, {"a": {"$type": 10}}, {});
+    y!(operator_type_39, {"a": {"$type": 11}}, {"a": Regex { pattern: "x".to_owned(), options: "".to_owned() }});
+    y!(operator_type_40, {"a": {"$type": "regex"}}, {"a": Regex { pattern: "x".to_owned(), options: "".to_owned() }});
+    n!(operator_type_41, {"a": {"$type": 11}}, {"a": "x"});
+    n!(operator_type_42, {"a": {"$type": 11}}, {});
+    n!(operator_type_43, {"a": {"$type": 4}}, {"a": []});
+    n!(operator_type_44, {"a": {"$type": 4}}, {"a": [1]});
+    y!(operator_type_45, {"a": {"$type": 1}}, {"a": [1]});
+    n!(operator_type_46, {"a": {"$type": 2}}, {"a": [1]});
+    y!(operator_type_47, {"a": {"$type": 1}}, {"a": ["1", 1]});
+    y!(operator_type_48, {"a": {"$type": 2}}, {"a": ["1", 1]});
+    n!(operator_type_49, {"a": {"$type": 3}}, {"a": ["1", 1]});
+    n!(operator_type_50, {"a": {"$type": 4}}, {"a": ["1", 1]});
+    n!(operator_type_51, {"a": {"$type": 1}}, {"a": ["1", []]});
+    y!(operator_type_52, {"a": {"$type": 2}}, {"a": ["1", []]});
+    y!(operator_type_53, {"a": {"$type": 4}}, {"a": ["1", []]});
+    y!(operator_type_54, {"a.0": {"$type": 4}}, {"a": [[0]]});
+    y!(operator_type_55, {"a.0": {"$type": "array"}}, {"a": [[0]]});
+    n!(operator_type_56, {"a.0": {"$type": 1}}, {"a": [[0]]});
 
     // $and + $in.
     n!(operators_and_in_1, {"$and": [{"a": {"$in": []}}]}, {});

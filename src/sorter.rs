@@ -90,7 +90,7 @@ pub fn cmp_value(lhs: &Value, rhs: &Value) -> Ordering {
 // TODO: It coerces all numbers into `1`, just like Meteor. It would be better
 // to support `double`, `int`, `long`, and `decimal` separately.
 /// <https://www.mongodb.com/docs/manual/reference/operator/query/type/#available-types>
-fn value_type(value: &Value) -> i8 {
+pub fn value_type(value: &Value) -> i8 {
     match value {
         Value::Array(_) => 4,
         Value::Bool(_) => 8,
@@ -104,7 +104,7 @@ fn value_type(value: &Value) -> i8 {
                     ["$InfNaN"] => return 1,
                     ["$binary"] => return 5,
                     ["$date"] => return 9,
-                    ["$regexp", "$flags"] => return 11,
+                    ["$flags", "$regexp"] => return 11,
                     ["$type", "$value"] => match object.get("$type").and_then(Value::as_str) {
                         Some("Decimal") => return 1,
                         Some("oid") => return 7,
