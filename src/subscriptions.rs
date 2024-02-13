@@ -1,6 +1,7 @@
 use crate::cursor::{Cursor, CursorDescription, CursorFetcher};
 use crate::inflights::Inflight;
 use crate::mergebox::Mergebox;
+use crate::watcher::Watcher;
 use anyhow::{anyhow, Error};
 use mongodb::Database;
 use serde::Deserialize;
@@ -10,18 +11,20 @@ use std::sync::{Arc, Weak};
 use tokio::sync::Mutex;
 
 pub struct Subscriptions {
-    database: Database,
     cursors_by_collection: BTreeMap<String, Vec<Weak<Mutex<Cursor>>>>,
     #[allow(clippy::type_complexity)]
     cursors_by_session: BTreeMap<usize, BTreeMap<String, Vec<Arc<Mutex<Cursor>>>>>,
+    database: Database,
+    watcher: Arc<Mutex<Watcher>>,
 }
 
 impl Subscriptions {
-    pub fn new(database: Database) -> Self {
+    pub fn new(database: Database, watcher: Watcher) -> Self {
         Self {
-            database,
             cursors_by_collection: BTreeMap::default(),
             cursors_by_session: BTreeMap::default(),
+            database,
+            watcher: Arc::new(Mutex::new(watcher)),
         }
     }
 
@@ -109,7 +112,7 @@ impl Subscriptions {
         }
 
         // Create and start a new cursor.
-        let fetcher = CursorFetcher::new(self.database.clone(), description);
+        let fetcher = CursorFetcher::new(self.database.clone(), description, self.watcher.clone());
         let mut cursor = Cursor::from(fetcher);
         cursor.start(session_id, mergebox).await?;
 

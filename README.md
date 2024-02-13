@@ -66,7 +66,6 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
 ## Limitations and known issues
 
 * **No resumption handling.** When an error occurs either on the client or server connection, both connections are closed.
-* **No Change Streams deduplication.** At the moment every cursor creates its own instance, eating up the connection pool _fast_.
 * **A limited support for real-time database updates.** If DDP Router can fully understand the query (including its projection, sorting, etc.) then it'll runt a Change Stream. If not, it'll fall back to pooling instead.
     * Missing query operators: `$bitsAllClear`, `$bitsAllSet`, `$bitsAnyClear`, `$bitsAnySet`, `$elemMatch`, `$regex` (PCRE2 is not feasible in Rust, but we could use [`regex`](https://crates.io/crates/regex) to cover most of it), and `$where` (not possible).
     * No nested projections and projection operators.
