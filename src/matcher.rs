@@ -119,6 +119,7 @@ enum BranchedMatcher {
         dont_include_leaf_arrays: bool,
     },
     Invert(Box<BranchedMatcher>),
+    Never,
 }
 
 impl BranchedMatcher {
@@ -137,6 +138,27 @@ impl BranchedMatcher {
         _is_root: bool,
     ) -> Result<Self, Error> {
         match operator {
+            "$all" => {
+                let operands = operand
+                    .as_array()
+                    .ok_or_else(|| anyhow!("$all expected an array, got {operand:?}"))?;
+                if operands.is_empty() {
+                    return Ok(Self::Never);
+                }
+
+                Ok(Self::all(
+                    operands
+                        .iter()
+                        .map(|operand| {
+                            if is_operator_object(operand) {
+                                Err(anyhow!("$all expected plain document, got {operand:?}"))
+                            } else {
+                                Ok(ElementMatcher::compile(operand)?.into_branched(false, false))
+                            }
+                        })
+                        .collect::<Result<_, _>>()?,
+                ))
+            }
             "$eq" => Ok(ElementMatcher::compile(operand)?.into_branched(false, false)),
             "$exists" => {
                 let matcher = ElementMatcher::Exists.into_branched(false, false);
@@ -293,6 +315,7 @@ impl BranchedMatcher {
                     .any(|element| matcher.matches(element.value))
             }
             Self::Invert(matcher) => !matcher.matches(branches),
+            Self::Never => false,
         }
     }
 }
@@ -704,6 +727,26 @@ mod tests {
     y!(nested_48, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"c": 1, "d": 2}}});
     n!(nested_49, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"c": 1, "d": 1}}});
     n!(nested_50, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"d": 2}}});
+
+    // $all.
+    y!(operator_all_01, {"a": {"$all": [1, 2]}}, {"a": [1, 2]});
+    n!(operator_all_02, {"a": {"$all": [1, 2, 3]}}, {"a": [1, 2]});
+    y!(operator_all_03, {"a": {"$all": [1, 2]}}, {"a": [3, 2, 1]});
+    y!(operator_all_04, {"a": {"$all": [1, "x"]}}, {"a": [3, "x", 1]});
+    n!(operator_all_05, {"a": {"$all": ["2"]}}, {"a": 2});
+    n!(operator_all_06, {"a": {"$all": [2]}}, {"a": "2"});
+    y!(operator_all_07, {"a": {"$all": [[1, 2], [1, 3]]}}, {"a": [[1, 3], [1, 2], [1, 4]]});
+    n!(operator_all_08, {"a": {"$all": [[1, 2], [1, 3]]}}, {"a": [[1, 4], [1, 2], [1, 4]]});
+    y!(operator_all_09, {"a": {"$all": [2, 2]}}, {"a": [2]});
+    n!(operator_all_10, {"a": {"$all": [2, 3]}}, {"a": [2, 2]});
+    n!(operator_all_11, {"a": {"$all": [1, 2]}}, {"a": [[1, 2]]});
+    n!(operator_all_12, {"a": {"$all": [1, 2]}}, {});
+    n!(operator_all_13, {"a": {"$all": [1, 2]}}, {"a": {"foo": "bar"}});
+    n!(operator_all_14, {"a": {"$all": []}}, {"a": []});
+    n!(operator_all_15, {"a": {"$all": []}}, {"a": [5]});
+    y!(operator_all_16, {"a": {"$all": [{"b": 3}]}}, {"a": [{"b": 3}]});
+    n!(operator_all_17, {"a": {"$all": [{"b": 3}]}}, {"a": [{"b": 3, "k": 4}]});
+    f!(operator_all_18, {"a": {"$all": [{"$gt": 4}]}});
 
     // $and.
     y!(operator_and_1, {"$and": [{"a": 1}]}, {"a": 1});
