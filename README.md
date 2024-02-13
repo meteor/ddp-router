@@ -38,6 +38,12 @@
         * `METEOR_URL`, e.g., `ws://127.0.0.1:3000/websocket`.
         * `MONGO_URL`, e.g., `mongodb://127.0.0.1:3001/?directConnection=true`.
         * `ROUTER_URL`, e.g., `127.0.0.1:4000`.
+    * alternatively you can add a .env file with the following content:
+        ```env
+          METEOR_URL="ws://127.0.0.1:3000/websocket"
+          MONGO_URL="mongodb://127.0.0.1:3001/meteor?directConnection=true"
+          ROUTER_URL="127.0.0.1:4000"
+        ```
     * `cargo run` starts it in a debug mode (add `--release` for release mode).
     * Alternatively, build it with `cargo build` and run manually.
 1. Use the Meteor app as normal.

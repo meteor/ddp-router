@@ -11,7 +11,9 @@ mod sorter;
 mod subscriptions;
 
 use crate::subscriptions::Subscriptions;
+
 use anyhow::Error;
+use dotenvy::dotenv;
 use mongodb::Client;
 use session::start_session;
 use std::env::var;
@@ -23,9 +25,13 @@ use tokio_tungstenite::{accept_async, connect_async};
 
 #[main]
 async fn main() -> Result<(), Error> {
+    // It is ok if .env file is not present.
+    dotenv().ok();
     let meteor_url = var("METEOR_URL").expect("METEOR_URL is required");
     let mongo_url = var("MONGO_URL").expect("MONGO_URL is required");
     let router_url = var("ROUTER_URL").expect("ROUTER_URL is required");
+
+    println!("\x1b[0;36m Starting DDP-router at:\x1b[0m {} ", router_url);
 
     let mut session_id_counter = 0;
     let listener = TcpListener::bind(router_url).await?;
