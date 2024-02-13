@@ -122,7 +122,7 @@ impl BranchedMatcher {
         _is_root: bool,
     ) -> Result<Self, Error> {
         match operator {
-            "$eq" => Ok(ElementMatcher::compile(operand).into_branched(false, false)),
+            "$eq" => Ok(ElementMatcher::compile(operand)?.into_branched(false, false)),
             "$exists" => {
                 let matcher = ElementMatcher::Exists.into_branched(false, false);
                 Ok(match operand {
@@ -155,7 +155,7 @@ impl BranchedMatcher {
                         if is_operator_object(operand) {
                             Err(anyhow!("$in expected plain document, got {operand:?}"))
                         } else {
-                            Ok(ElementMatcher::compile(operand).into_branched(false, false))
+                            Ok(ElementMatcher::compile(operand)?.into_branched(false, false))
                         }
                     })
                     .collect::<Result<_, _>>()?,
@@ -221,12 +221,15 @@ impl BranchedMatcher {
                     .collect::<Result<_, _>>()?,
             ))
         } else {
-            Ok(ElementMatcher::compile(selector).into_branched(false, false))
+            Ok(ElementMatcher::compile(selector)?.into_branched(false, false))
         }
     }
 
     fn invert(self) -> Self {
-        Self::Invert(Box::new(self))
+        match self {
+            Self::Invert(inverted) => *inverted,
+            not_inverted => Self::Invert(Box::new(not_inverted)),
+        }
     }
 
     fn matches(&self, branches: Vec<ValueBranch>) -> bool {
@@ -270,8 +273,30 @@ enum ElementMatcher {
 }
 
 impl ElementMatcher {
-    fn compile(selector: &Bson) -> Self {
-        Self::Value(into_ejson(selector.clone()))
+    fn compile(selector: &Bson) -> Result<Self, Error> {
+        match selector {
+            Bson::Array(_)
+            | Bson::Binary(_)
+            | Bson::Boolean(_)
+            | Bson::DateTime(_)
+            | Bson::Decimal128(_)
+            | Bson::Document(_)
+            | Bson::Double(_)
+            | Bson::Int32(_)
+            | Bson::Int64(_)
+            | Bson::Null
+            | Bson::ObjectId(_)
+            | Bson::String(_) => Ok(Self::Value(into_ejson(selector.clone()))),
+            Bson::DbPointer(_)
+            | Bson::JavaScriptCode(_)
+            | Bson::JavaScriptCodeWithScope(_)
+            | Bson::MaxKey
+            | Bson::MinKey
+            | Bson::RegularExpression(_)
+            | Bson::Symbol(_)
+            | Bson::Timestamp(_)
+            | Bson::Undefined => Err(anyhow!("Selector not supported: {selector:?}")),
+        }
     }
 
     fn into_branched(
