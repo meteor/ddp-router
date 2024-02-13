@@ -69,9 +69,14 @@ impl DocumentMatcher {
     }
 
     fn compile_many(selector: &Bson, is_in_elem_match: bool) -> Result<Vec<Self>, Error> {
-        selector
+        let selectors = selector
             .as_array()
-            .ok_or_else(|| anyhow!("Expected array of selectors, got {selector:?}"))?
+            .ok_or_else(|| anyhow!("Expected array of selectors, got {selector:?}"))?;
+        if selectors.is_empty() {
+            return Err(anyhow!("Expected non-empty array of selectors"));
+        }
+
+        selectors
             .iter()
             .map(|selector| {
                 let document = selector
@@ -512,7 +517,17 @@ mod tests {
     macro_rules! y {($name:ident, { $($selector:tt)* }, { $($document:tt)* }) => {test!($name, { $($selector)* }, { $($document)* }, true);}}
     macro_rules! n {($name:ident, { $($selector:tt)* }, { $($document:tt)* }) => {test!($name, { $($selector)* }, { $($document)* }, false);}}
 
-    // Mostly taken from https://github.com/meteor/meteor/blob/7411b3c85a3c95a6b6f3c588babe6eae894d6fb6/packages/minimongo/minimongo_tests_client.js#L384.
+    macro_rules! f {
+        ($name:ident, { $($selector:tt)* }) => {
+            #[test]
+            fn $name() {
+                let selector = &doc! { $($selector)* };
+                if let Ok(matcher) = DocumentMatcher::compile(selector) {
+                    panic!("{selector:?} should not be supported, got {matcher:?}");
+                }
+            }
+        };
+    }
 
     // Empty selector.
     y!(empty_1, {}, {});
@@ -660,6 +675,8 @@ mod tests {
     n!(operator_and_5, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1, "b": 2});
     y!(operator_and_6, {"$and": [{"a": 1}, {"b": 2}], "c": 3}, {"a": 1, "b": 2, "c": 3});
     n!(operator_and_7, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
+    f!(operator_and_8, {"$and": []});
+    f!(operator_and_9, {"$and": [5]});
 
     // $eq.
     n!(operator_eq_01, {"a": {"$eq": 1}}, {"a": 2});
@@ -813,6 +830,8 @@ mod tests {
     n!(operator_or_15, {"x": 1, "$or": [{"a": 1}, {"b": 1}]}, {"x": 1});
     y!(operator_or_16, {"$or": [{"a": {"b": 1, "c": 2}}, {"a": {"b": 2, "c": 1}}]}, {"a": {"b": 1, "c": 2}});
     n!(operator_or_17, {"$or": [{"a": {"b": 1, "c": 3}}, {"a": {"b": 2, "c": 1}}]}, {"a": {"b": 1, "c": 2}});
+    f!(operator_or_18, {"$or": []});
+    f!(operator_or_19, {"$or": [5]});
 
     // $size.
     y!(operator_size_01, {"a": {"$size": 0}}, {"a": []});
@@ -883,6 +902,10 @@ mod tests {
     y!(operator_type_54, {"a.0": {"$type": 4}}, {"a": [[0]]});
     y!(operator_type_55, {"a.0": {"$type": "array"}}, {"a": [[0]]});
     n!(operator_type_56, {"a.0": {"$type": 1}}, {"a": [[0]]});
+    f!(operator_type_57, {"a": {"$type": "foo"}});
+    f!(operator_type_58, {"a": {"$type": -2}});
+    f!(operator_type_59, {"a": {"$type": 0}});
+    f!(operator_type_60, {"a": {"$type": 20}});
 
     // $and + $in.
     n!(operators_and_in_1, {"$and": [{"a": {"$in": []}}]}, {});
