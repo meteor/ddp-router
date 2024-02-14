@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::spawn;
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
-use tokio::time::{interval_at, Duration, Instant};
+use tokio::time::{interval_at, Duration, Instant, Interval};
 
 const OK: Result<(), Error> = Ok(());
 
@@ -66,9 +66,7 @@ impl Cursor {
                         fetcher.lock().await.process(event, &mergeboxes).await?;
                     }
                 } else {
-                    // TODO: Make interval configurable.
-                    let interval = Duration::from_secs(5);
-                    let mut timer = interval_at(Instant::now() + interval, interval);
+                    let mut timer = { fetcher.lock().await.interval() };
                     loop {
                         timer.tick().await;
                         fetcher.lock().await.fetch(&mergeboxes).await?;
@@ -200,6 +198,11 @@ impl CursorFetcher {
         OK
     }
 
+    fn interval(&self) -> Interval {
+        let interval = Duration::from_millis(self.description.options.polling_interval_ms);
+        interval_at(Instant::now() + interval, interval)
+    }
+
     pub fn new(
         database: Database,
         description: CursorDescription,
@@ -308,6 +311,7 @@ impl CursorFetcher {
             selector,
             options:
                 CursorOptions {
+                    disable_oplog,
                     limit,
                     projection,
                     skip,
@@ -315,6 +319,11 @@ impl CursorFetcher {
                     ..
                 },
         } = &self.description;
+
+        // Publication can opt-out of real-time updates.
+        if *disable_oplog {
+            return Ok(None);
+        }
 
         // We have to understand the selector to process the Change Stream
         // events correctly.
@@ -357,11 +366,24 @@ impl CursorFetcher {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CursorOptions {
+    #[serde(default, rename = "disableOplog")]
+    pub disable_oplog: bool,
     pub limit: Option<i64>,
+    #[serde(
+        default = "CursorOptions::default_polling_interval_ms",
+        rename = "pollingIntervalMs"
+    )]
+    pub polling_interval_ms: u64,
     pub projection: Option<Document>,
     pub skip: Option<u64>,
     pub sort: Option<Document>,
     pub transform: Option<()>,
+}
+
+impl CursorOptions {
+    fn default_polling_interval_ms() -> u64 {
+        10_000
+    }
 }
 
 impl From<CursorOptions> for FindOptions {
