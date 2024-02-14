@@ -8,8 +8,9 @@ use serde_json::{Map, Value};
 
 #[derive(Debug)]
 pub enum DocumentMatcher {
-    All(Vec<DocumentMatcher>),
-    Any(Vec<DocumentMatcher>),
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Invert(Box<Self>),
     Lookup {
         #[allow(private_interfaces)]
         lookup: ValueLookup,
@@ -39,6 +40,7 @@ impl DocumentMatcher {
         Ok(Self::all(
             selector
                 .iter()
+                .filter(|(key, _)| key.as_str() != "$comment") // Ignore it.
                 .map(|(key, sub_selector)| {
                     if key.starts_with('$') {
                         Self::compile_logical_operator(key, sub_selector, is_in_elem_match)
@@ -64,6 +66,9 @@ impl DocumentMatcher {
         match operator {
             "$and" => Self::compile_many(selector, is_in_elem_match).map(Self::all),
             "$or" => Self::compile_many(selector, is_in_elem_match).map(Self::any),
+            "$nor" => Self::compile_many(selector, is_in_elem_match)
+                .map(Self::any)
+                .map(Self::invert),
             operator => Err(anyhow!("{operator} is not supported")),
         }
     }
@@ -87,10 +92,15 @@ impl DocumentMatcher {
             .collect()
     }
 
+    fn invert(self) -> Self {
+        Self::Invert(Box::new(self))
+    }
+
     pub fn matches(&self, document: &Map<String, Value>) -> bool {
         match &self {
             Self::All(matchers) => matchers.iter().all(|matcher| matcher.matches(document)),
             Self::Any(matchers) => matchers.iter().any(|matcher| matcher.matches(document)),
+            Self::Invert(matcher) => !matcher.matches(document),
             Self::Lookup { lookup, matcher } => {
                 // TODO: Get rid of `clone`.
                 matcher.matches(lookup.lookup(&Value::Object(document.clone())))
@@ -109,6 +119,7 @@ enum BranchedMatcher {
         dont_include_leaf_arrays: bool,
     },
     Invert(Box<BranchedMatcher>),
+    Never,
 }
 
 impl BranchedMatcher {
@@ -127,6 +138,27 @@ impl BranchedMatcher {
         _is_root: bool,
     ) -> Result<Self, Error> {
         match operator {
+            "$all" => {
+                let operands = operand
+                    .as_array()
+                    .ok_or_else(|| anyhow!("$all expected an array, got {operand:?}"))?;
+                if operands.is_empty() {
+                    return Ok(Self::Never);
+                }
+
+                Ok(Self::all(
+                    operands
+                        .iter()
+                        .map(|operand| {
+                            if is_operator_object(operand) {
+                                Err(anyhow!("$all expected plain document, got {operand:?}"))
+                            } else {
+                                Ok(ElementMatcher::compile(operand)?.into_branched(false, false))
+                            }
+                        })
+                        .collect::<Result<_, _>>()?,
+                ))
+            }
             "$eq" => Ok(ElementMatcher::compile(operand)?.into_branched(false, false)),
             "$exists" => {
                 let matcher = ElementMatcher::Exists.into_branched(false, false);
@@ -165,8 +197,31 @@ impl BranchedMatcher {
                     })
                     .collect::<Result<_, _>>()?,
             )),
+            "$mod" => {
+                let operands = operand
+                    .as_array()
+                    .ok_or_else(|| anyhow!("$mod expected an array, got {operand:?}"))?;
+                if operands.len() != 2 {
+                    return Err(anyhow!("$mod expected 2 arguments, got {operand:?}"));
+                }
+
+                let parse = |value: &Bson| -> Result<i64, Error> {
+                    Ok(match value {
+                        Bson::Double(n) if n.is_finite() => n.trunc() as i64,
+                        Bson::Int32(n) => *n as i64,
+                        Bson::Int64(n) => *n,
+                        value => return Err(anyhow!("$mod expected a number, got {value:?}")),
+                    })
+                };
+
+                let div = parse(&operands[0])?;
+                let rem = parse(&operands[1])?;
+
+                Ok(ElementMatcher::Mod(div, rem).into_branched(false, false))
+            }
             "$ne" => Self::compile_operator("$eq", operand, _selector, _is_root).map(Self::invert),
             "$nin" => Self::compile_operator("$in", operand, _selector, _is_root).map(Self::invert),
+            "$not" => Self::compile_value_selector(operand, false).map(Self::invert),
             "$size" => {
                 let size: usize = match operand {
                     // TODO: Can we make it safe?
@@ -260,6 +315,7 @@ impl BranchedMatcher {
                     .any(|element| matcher.matches(element.value))
             }
             Self::Invert(matcher) => !matcher.matches(branches),
+            Self::Never => false,
         }
     }
 }
@@ -267,6 +323,7 @@ impl BranchedMatcher {
 #[derive(Debug)]
 enum ElementMatcher {
     Exists,
+    Mod(i64, i64),
     Order {
         selector: Value,
         ordering: Ordering,
@@ -319,6 +376,10 @@ impl ElementMatcher {
     fn matches(&self, maybe_value: Option<&Value>) -> bool {
         match &self {
             Self::Exists => maybe_value.is_some(),
+            // TODO: Check how MongoDB handles $mod of floats.
+            Self::Mod(div, rem) => maybe_value
+                .and_then(Value::as_i64)
+                .is_some_and(|number| number % div == *rem),
             Self::Order {
                 selector: Value::Array(_),
                 ..
@@ -667,6 +728,26 @@ mod tests {
     n!(nested_49, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"c": 1, "d": 1}}});
     n!(nested_50, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"d": 2}}});
 
+    // $all.
+    y!(operator_all_01, {"a": {"$all": [1, 2]}}, {"a": [1, 2]});
+    n!(operator_all_02, {"a": {"$all": [1, 2, 3]}}, {"a": [1, 2]});
+    y!(operator_all_03, {"a": {"$all": [1, 2]}}, {"a": [3, 2, 1]});
+    y!(operator_all_04, {"a": {"$all": [1, "x"]}}, {"a": [3, "x", 1]});
+    n!(operator_all_05, {"a": {"$all": ["2"]}}, {"a": 2});
+    n!(operator_all_06, {"a": {"$all": [2]}}, {"a": "2"});
+    y!(operator_all_07, {"a": {"$all": [[1, 2], [1, 3]]}}, {"a": [[1, 3], [1, 2], [1, 4]]});
+    n!(operator_all_08, {"a": {"$all": [[1, 2], [1, 3]]}}, {"a": [[1, 4], [1, 2], [1, 4]]});
+    y!(operator_all_09, {"a": {"$all": [2, 2]}}, {"a": [2]});
+    n!(operator_all_10, {"a": {"$all": [2, 3]}}, {"a": [2, 2]});
+    n!(operator_all_11, {"a": {"$all": [1, 2]}}, {"a": [[1, 2]]});
+    n!(operator_all_12, {"a": {"$all": [1, 2]}}, {});
+    n!(operator_all_13, {"a": {"$all": [1, 2]}}, {"a": {"foo": "bar"}});
+    n!(operator_all_14, {"a": {"$all": []}}, {"a": []});
+    n!(operator_all_15, {"a": {"$all": []}}, {"a": [5]});
+    y!(operator_all_16, {"a": {"$all": [{"b": 3}]}}, {"a": [{"b": 3}]});
+    n!(operator_all_17, {"a": {"$all": [{"b": 3}]}}, {"a": [{"b": 3, "k": 4}]});
+    f!(operator_all_18, {"a": {"$all": [{"$gt": 4}]}});
+
     // $and.
     y!(operator_and_1, {"$and": [{"a": 1}]}, {"a": 1});
     n!(operator_and_2, {"$and": [{"a": 1}, {"a": 2}]}, {"a": 1});
@@ -677,6 +758,10 @@ mod tests {
     n!(operator_and_7, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
     f!(operator_and_8, {"$and": []});
     f!(operator_and_9, {"$and": [5]});
+
+    // $comment.
+    y!(operator_comment_1, {"a": 5, "$comment": "Some text..."}, {"a": 5});
+    n!(operator_comment_2, {"a": 6, "$comment": "Some text..."}, {"a": 5});
 
     // $eq.
     n!(operator_eq_01, {"a": {"$eq": 1}}, {"a": 2});
@@ -771,6 +856,18 @@ mod tests {
     n!(operator_lte_3, {"a": {"$lte": 10}}, {"a": 11});
     y!(operator_lte_4, {"a": {"$lte": {"x": [2, 3, 4]}}}, {"a": {"x": [2, 3, 4]}});
 
+    // $mod.
+    y!(operator_mod_01, {"a": {"$mod": [10, 1]}}, {"a": 11});
+    n!(operator_mod_02, {"a": {"$mod": [10, 1]}}, {"a": 12});
+    y!(operator_mod_03, {"a": {"$mod": [10, 1]}}, {"a": [10, 11, 12]});
+    n!(operator_mod_04, {"a": {"$mod": [10, 1]}}, {"a": [10, 12]});
+    f!(operator_mod_05, {"a": {"$mod": 5}});
+    f!(operator_mod_06, {"a": {"$mod": [10]}});
+    f!(operator_mod_07, {"a": {"$mod": [10, 1, 2]}});
+    f!(operator_mod_08, {"a": {"$mod": "foo"}});
+    f!(operator_mod_09, {"a": {"$mod": {"bar": 1}}});
+    f!(operator_mod_10, {"a": {"$mod": []}});
+
     // $ne.
     y!(operator_ne_01, {"a": {"$ne": 1}}, {"a": 2});
     n!(operator_ne_02, {"a": {"$ne": 2}}, {"a": 2});
@@ -811,6 +908,17 @@ mod tests {
     n!(operator_nin_22, {"a.b": {"$nin": [1, null]}}, {"a": [{"b": 5}, {}]});
     y!(operator_nin_23, {"a.b": {"$nin": [1, null]}}, {"a": [{"b": 5}, []]});
     y!(operator_nin_24, {"a.b": {"$nin": [1, null]}}, {"a": [{"b": 5}, 5]});
+
+    // $not.
+    y!(operator_not_1, {"x": {"$not": {"$gt": 7}}}, {"x": 6});
+    n!(operator_not_2, {"x": {"$not": {"$gt": 7}}}, {"x": 8});
+    y!(operator_not_3, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 11});
+    n!(operator_not_4, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 9});
+    y!(operator_not_5, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 6});
+    y!(operator_not_6, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4]});
+    y!(operator_not_7, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}]});
+    n!(operator_not_8, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4, 10]});
+    n!(operator_not_9, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}, {"y": 10}]});
 
     // $or.
     y!(operator_or_01, {"$or": [{"a": 1}]}, {"a": 1});
@@ -922,6 +1030,12 @@ mod tests {
     n!(operators_and_ne_4, {"$and": [{"a": {"$ne": 1}}, {"a": {"$ne": 2}}]}, {"a": 2});
     y!(operators_and_ne_5, {"$and": [{"a": {"$ne": 1}}, {"a": {"$ne": 3}}]}, {"a": 2});
 
+    // $and + $not.
+    y!(operators_and_not_1, {"$and": [{"a": {"$not": {"$gt": 2}}}]}, {"a": 1});
+    n!(operators_and_not_2, {"$and": [{"a": {"$not": {"$lt": 2}}}]}, {"a": 1});
+    y!(operators_and_not_3, {"$and": [{"a": {"$not": {"$lt": 0}}}, {"a": {"$not": {"$gt": 2}}}]}, {"a": 1});
+    n!(operators_and_not_4, {"$and": [{"a": {"$not": {"$lt": 2}}}, {"a": {"$not": {"$gt": 0}}}]}, {"a": 1});
+
     // $gt + $lt.
     n!(operators_gt_lt_1, {"a": {"$lt": 11, "$gt": 9}}, {"a": 8});
     n!(operators_gt_lt_2, {"a": {"$lt": 11, "$gt": 9}}, {"a": 9});
@@ -958,4 +1072,22 @@ mod tests {
     y!(operators_ne_or_5, {"$or": [{"a": {"$ne": 1}}, {"a": {"$ne": 2}}]}, {"a": 1});
     y!(operators_ne_or_6, {"$or": [{"a": {"$ne": 1}}, {"b": {"$ne": 1}}]}, {"a": 1});
     n!(operators_ne_or_7, {"$or": [{"a": {"$ne": 1}}, {"b": {"$ne": 2}}]}, {"a": 1, "b": 2});
+
+    // $nor + $not.
+    n!(operators_nor_not_1, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {});
+    y!(operators_nor_not_2, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {"a": 1});
+    n!(operators_nor_not_3, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {"a": 2});
+    n!(operators_nor_not_4, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$not": {"$mod": [10, 2]}}}]}, {"a": 1});
+    y!(operators_nor_not_5, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 1});
+    n!(operators_nor_not_6, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 2});
+    n!(operators_nor_not_7, {"$nor": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 3});
+
+    // $not + $or.
+    y!(operators_not_or_1, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {});
+    n!(operators_not_or_2, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {"a": 1});
+    y!(operators_not_or_3, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}]}, {"a": 2});
+    y!(operators_not_or_4, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$not": {"$mod": [10, 2]}}}]}, {"a": 1});
+    n!(operators_not_or_5, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 1});
+    y!(operators_not_or_6, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 2});
+    y!(operators_not_or_7, {"$or": [{"a": {"$not": {"$mod": [10, 1]}}}, {"a": {"$mod": [10, 2]}}]}, {"a": 3});
 }

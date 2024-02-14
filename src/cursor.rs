@@ -4,20 +4,20 @@ use crate::matcher::DocumentMatcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::projector::Projector;
 use crate::sorter as Sorter;
+use crate::watcher::{Event, Watcher};
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
 use futures_util::{FutureExt, StreamExt, TryStreamExt};
-use mongodb::change_stream::event::{ChangeStreamEvent, OperationType};
-use mongodb::change_stream::ChangeStream;
-use mongodb::options::{ChangeStreamOptions, FindOptions, FullDocumentType};
+use mongodb::options::FindOptions;
 use mongodb::Database;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::mem::{replace, take};
 use std::sync::Arc;
 use tokio::spawn;
+use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
-use tokio::time::{interval_at, Duration, Instant};
+use tokio::time::{interval_at, Duration, Instant, Interval};
 
 const OK: Result<(), Error> = Ok(());
 
@@ -57,23 +57,16 @@ impl Cursor {
             let fetcher = self.fetcher.clone();
             let task = async move {
                 // Separate context to eliminate locking.
-                let maybe_change_stream = { fetcher.lock().await.create_change_stream().await? };
+                let maybe_receiver = { fetcher.lock().await.watch().await? };
 
-                // Start a Change Stream or fall back to pooling.
-                if let Some(mut change_stream) = maybe_change_stream {
-                    while let Some(event) = change_stream.try_next().await? {
-                        fetcher
-                            .lock()
-                            .await
-                            .handle_change_stream_event(event, &mergeboxes)
-                            .await?;
+                // Start an event processor or fall back to pooling.
+                if let Some(mut receiver) = maybe_receiver {
+                    loop {
+                        let event = receiver.recv().await?;
+                        fetcher.lock().await.process(event, &mergeboxes).await?;
                     }
-
-                    OK
                 } else {
-                    // TODO: Make interval configurable.
-                    let interval = Duration::from_secs(5);
-                    let mut timer = interval_at(Instant::now() + interval, interval);
+                    let mut timer = { fetcher.lock().await.interval() };
                     loop {
                         timer.tick().await;
                         fetcher.lock().await.fetch(&mergeboxes).await?;
@@ -162,182 +155,10 @@ pub struct CursorFetcher {
     documents: Vec<Map<String, Value>>,
     matcher: Option<DocumentMatcher>,
     projector: Option<Projector>,
+    watcher: Arc<Mutex<Watcher>>,
 }
 
 impl CursorFetcher {
-    async fn create_change_stream(
-        &mut self,
-    ) -> Result<Option<ChangeStream<ChangeStreamEvent<Document>>>, Error> {
-        let CursorDescription {
-            collection,
-            selector,
-            options,
-        } = &self.description;
-
-        // We have to understand the selector to process the Change Stream
-        // events correctly.
-        match DocumentMatcher::compile(selector) {
-            Ok(matcher) => self.matcher = Some(matcher),
-            Err(error) => {
-                println!(
-                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector ({selector:?}) is not supported: {error}\x1b[0m"
-                );
-                return Ok(None);
-            }
-        };
-
-        match Projector::compile(options.projection.as_ref()) {
-            Ok(projector) => self.projector = Some(projector),
-            Err(error) => {
-                println!(
-                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection ({:?}) is not supported: {error}\x1b[0m",
-                    options.projection,
-                );
-                return Ok(None);
-            }
-        }
-
-        if !Sorter::is_supported(options.sort.as_ref()) {
-            println!(
-                "\x1b[0;32mmongo\x1b[0m \x1b[0;31msort not supported\x1b[0m ({:?})",
-                options.sort
-            );
-            return Ok(None);
-        }
-
-        // TODO: Implement top-N logic.
-        if options.limit.is_some() || options.skip.is_some() {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit and skip are not supported\x1b[0m");
-            return Ok(None);
-        }
-
-        // TODO: Reusue Change Streams between `Cursor`s.
-        // The current Meteor's Oplog tailing has to refetch a document by `_id`
-        // when a document outside of the current documents set is updated and
-        // it _may_ match the selector now. With Change Streams we can skip that
-        // by fetching the full documents.
-        // https://github.com/meteor/meteor/blob/7411b3c85a3c95a6b6f3c588babe6eae894d6fb6/packages/mongo/oplog_observe_driver.js#L652
-        let pipeline = [
-            doc! { "$match": { "operationType": { "$in": ["delete", "drop", "dropDatabase", "insert", "update"] } } },
-            doc! { "$project": { "_id": 1, "documentKey": 1, "fullDocument": 1, "ns": 1, "operationType": 1 } },
-        ];
-        let options = ChangeStreamOptions::builder()
-            // TODO: Ideally we would use `Required` here, but it has to be
-            // enabled on the database level. It should be configurable.
-            .full_document(Some(FullDocumentType::UpdateLookup))
-            .build();
-        let change_stream = self
-            .database
-            .collection(collection)
-            .watch(pipeline, Some(options))
-            .await?;
-        Ok(Some(change_stream))
-    }
-
-    async fn handle_change_stream_event(
-        &mut self,
-        event: ChangeStreamEvent<Document>,
-        mergeboxes: &Arc<Mutex<Mergeboxes>>,
-    ) -> Result<(), Error> {
-        match event {
-            ChangeStreamEvent {
-                operation_type: OperationType::Delete,
-                document_key: Some(document),
-                ..
-            } => {
-                let mut document = into_ejson_document(document);
-                let id = extract_id(&mut document)?;
-                let index = self
-                    .documents
-                    .iter()
-                    .position(|x| x.get("_id") == Some(&id))
-                    .ok_or_else(|| {
-                        anyhow!("Document {id} not found in {}", self.description.collection)
-                    })?;
-                let mut document = self.documents.swap_remove(index);
-                document.remove("_id");
-                mergeboxes
-                    .lock()
-                    .await
-                    .remove(self.description.collection.clone(), id, &document)
-                    .await
-            }
-            ChangeStreamEvent {
-                operation_type: OperationType::Drop | OperationType::DropDatabase,
-                ..
-            } => {
-                let mut mergeboxes = mergeboxes.lock().await;
-                for mut document in take(&mut self.documents) {
-                    let id = extract_id(&mut document)?;
-                    mergeboxes
-                        .remove(self.description.collection.clone(), id, &document)
-                        .await?;
-                }
-                OK
-            }
-            ChangeStreamEvent {
-                operation_type: OperationType::Insert,
-                full_document: Some(document),
-                ..
-            } => {
-                let mut document = into_ejson_document(document);
-                if !self.matcher.as_ref().unwrap().matches(&document) {
-                    return OK;
-                }
-
-                document = self.projector.as_ref().unwrap().apply(document);
-
-                self.documents.push(document.clone());
-                let id = extract_id(&mut document)?;
-                mergeboxes
-                    .lock()
-                    .await
-                    .insert(self.description.collection.clone(), id, document)
-                    .await
-            }
-            ChangeStreamEvent {
-                operation_type: OperationType::Update,
-                full_document: Some(document),
-                ..
-            } => {
-                let mut document = into_ejson_document(document);
-                let is_matching = self.matcher.as_ref().unwrap().matches(&document);
-                if is_matching {
-                    self.documents.push(document.clone());
-                }
-
-                document = self.projector.as_ref().unwrap().apply(document);
-
-                let id = extract_id(&mut document)?;
-                if is_matching {
-                    mergeboxes
-                        .lock()
-                        .await
-                        .insert(self.description.collection.clone(), id.clone(), document)
-                        .await?;
-                }
-
-                let maybe_index = self
-                    .documents
-                    .iter()
-                    .position(|x| x.get("_id") == Some(&id));
-                if let Some(index) = maybe_index {
-                    let mut document = self.documents.swap_remove(index);
-                    document.remove("_id");
-                    mergeboxes
-                        .lock()
-                        .await
-                        .remove(self.description.collection.clone(), id, &document)
-                        .await?;
-                }
-
-                OK
-            }
-            // TODO: Handle other events.
-            _ => Err(anyhow!("Unsupported event {event:?}")),
-        }
-    }
-
     async fn fetch(&mut self, mergeboxes: &Arc<Mutex<Mergeboxes>>) -> Result<(), Error> {
         println!("\x1b[0;32mmongo\x1b[0m  fetch({:?})", self.description);
 
@@ -377,25 +198,192 @@ impl CursorFetcher {
         OK
     }
 
-    pub fn new(database: Database, description: CursorDescription) -> Self {
+    fn interval(&self) -> Interval {
+        let interval = Duration::from_millis(self.description.options.polling_interval_ms);
+        interval_at(Instant::now() + interval, interval)
+    }
+
+    pub fn new(
+        database: Database,
+        description: CursorDescription,
+        watcher: Arc<Mutex<Watcher>>,
+    ) -> Self {
         Self {
             database,
             description,
             documents: Vec::default(),
             matcher: None,
             projector: None,
+            watcher,
         }
+    }
+
+    async fn process(
+        &mut self,
+        event: Event,
+        mergeboxes: &Arc<Mutex<Mergeboxes>>,
+    ) -> Result<(), Error> {
+        match event {
+            Event::Clear => {
+                let mut mergeboxes = mergeboxes.lock().await;
+                for mut document in take(&mut self.documents) {
+                    let id = extract_id(&mut document)?;
+                    mergeboxes
+                        .remove(self.description.collection.clone(), id, &document)
+                        .await?;
+                }
+                OK
+            }
+            Event::Delete(document) => {
+                let mut document = into_ejson_document(document);
+                let id = extract_id(&mut document)?;
+                let index = self
+                    .documents
+                    .iter()
+                    .position(|x| x.get("_id") == Some(&id))
+                    .ok_or_else(|| {
+                        anyhow!("Document {id} not found in {}", self.description.collection)
+                    })?;
+                let mut document = self.documents.swap_remove(index);
+                document.remove("_id");
+                mergeboxes
+                    .lock()
+                    .await
+                    .remove(self.description.collection.clone(), id, &document)
+                    .await
+            }
+            Event::Insert(document) => {
+                let mut document = into_ejson_document(document);
+                if !self.matcher.as_ref().unwrap().matches(&document) {
+                    return OK;
+                }
+
+                document = self.projector.as_ref().unwrap().apply(document);
+
+                self.documents.push(document.clone());
+                let id = extract_id(&mut document)?;
+                mergeboxes
+                    .lock()
+                    .await
+                    .insert(self.description.collection.clone(), id, document)
+                    .await
+            }
+            Event::Update(document) => {
+                let mut document = into_ejson_document(document);
+                let is_matching = self.matcher.as_ref().unwrap().matches(&document);
+                if is_matching {
+                    self.documents.push(document.clone());
+                }
+
+                document = self.projector.as_ref().unwrap().apply(document);
+
+                let id = extract_id(&mut document)?;
+                if is_matching {
+                    mergeboxes
+                        .lock()
+                        .await
+                        .insert(self.description.collection.clone(), id.clone(), document)
+                        .await?;
+                }
+
+                let maybe_index = self
+                    .documents
+                    .iter()
+                    .position(|x| x.get("_id") == Some(&id));
+                if let Some(index) = maybe_index {
+                    let mut document = self.documents.swap_remove(index);
+                    document.remove("_id");
+                    mergeboxes
+                        .lock()
+                        .await
+                        .remove(self.description.collection.clone(), id, &document)
+                        .await?;
+                }
+
+                OK
+            }
+        }
+    }
+
+    async fn watch(&mut self) -> Result<Option<Receiver<Event>>, Error> {
+        let CursorDescription {
+            collection,
+            selector,
+            options:
+                CursorOptions {
+                    disable_oplog,
+                    limit,
+                    projection,
+                    skip,
+                    sort,
+                    ..
+                },
+        } = &self.description;
+
+        // Publication can opt-out of real-time updates.
+        if *disable_oplog {
+            return Ok(None);
+        }
+
+        // We have to understand the selector to process the Change Stream
+        // events correctly.
+        match DocumentMatcher::compile(selector) {
+            Ok(matcher) => self.matcher = Some(matcher),
+            Err(error) => {
+                println!(
+                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector {selector:?} is not supported: {error}\x1b[0m"
+                );
+                return Ok(None);
+            }
+        };
+
+        match Projector::compile(projection.as_ref()) {
+            Ok(projector) => self.projector = Some(projector),
+            Err(error) => {
+                println!(
+                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection {projection:?} is not supported: {error}\x1b[0m",
+                );
+                return Ok(None);
+            }
+        }
+
+        if !Sorter::is_supported(sort.as_ref()) {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31msort {sort:?} not supported\x1b[0m",);
+            return Ok(None);
+        }
+
+        // TODO: Implement top-N logic.
+        if limit.is_some() || skip.is_some() {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit and skip are not supported\x1b[0m");
+            return Ok(None);
+        }
+
+        let receiver = self.watcher.lock().await.watch(collection.clone()).await;
+        Ok(Some(receiver))
     }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CursorOptions {
+    #[serde(default, rename = "disableOplog")]
+    pub disable_oplog: bool,
     pub limit: Option<i64>,
+    #[serde(
+        default = "CursorOptions::default_polling_interval_ms",
+        rename = "pollingIntervalMs"
+    )]
+    pub polling_interval_ms: u64,
     pub projection: Option<Document>,
     pub skip: Option<u64>,
     pub sort: Option<Document>,
     pub transform: Option<()>,
+}
+
+impl CursorOptions {
+    fn default_polling_interval_ms() -> u64 {
+        10_000
+    }
 }
 
 impl From<CursorOptions> for FindOptions {

@@ -11,7 +11,8 @@
     Meteor.publish = function publishWithDDPRouter(name, fn) {
       Meteor.methods({
         [`__subscription__${name}`]() {
-          const maybeCursorOrCursors = fn.apply(this, arguments);
+          const context = { ...this, ready() {}, unblock() {} };
+          const maybeCursorOrCursors = fn.apply(context, arguments);
           const cursors =
             Array.isArray(maybeCursorOrCursors)
               ? maybeCursorOrCursors
@@ -20,7 +21,7 @@
               : [];
           const cursorDescriptions = cursors.map(cursor => cursor._cursorDescription);
           // Use BSON's EJSON instead of Meteor's one and return a string to make
-          // sure the latter won't interfere.;
+          // sure the latter won't interfere.
           return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
         },
       });
@@ -71,8 +72,11 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
 
 ## Limitations and known issues
 
-* **No error handling.** All errors are logged and result in websocket termination.
+* **No resumption handling.** When an error occurs either on the client or server connection, both connections are closed.
 * **A limited support for real-time database updates.** If DDP Router can fully understand the query (including its projection, sorting, etc.) then it'll runt a Change Stream. If not, it'll fall back to pooling instead.
+    * Missing query operators: `$bitsAllClear`, `$bitsAllSet`, `$bitsAnyClear`, `$bitsAnySet`, `$elemMatch`, `$regex` (PCRE2 is not feasible in Rust, but we could use [`regex`](https://crates.io/crates/regex) to cover most of it), and `$where` (not possible).
+    * No nested projections and projection operators.
+    * No `limit` and `skip`.
 * **Collections with `ObjectId` in the `_id` field.** It looks like Meteor does not use `EJSON` for serializing the `_id` field, but DDP Router does. Instead of patching the DDP Router, patch the Meteor app using the following code:
     ```ts
     import { MongoID } from 'meteor/mongo-id';

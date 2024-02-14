@@ -9,6 +9,7 @@ mod projector;
 mod session;
 mod sorter;
 mod subscriptions;
+mod watcher;
 
 use crate::subscriptions::Subscriptions;
 
@@ -22,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::{main, spawn};
 use tokio_tungstenite::{accept_async, connect_async};
+use watcher::Watcher;
 
 #[main]
 async fn main() -> Result<(), Error> {
@@ -36,7 +38,8 @@ async fn main() -> Result<(), Error> {
     let mut session_id_counter = 0;
     let listener = TcpListener::bind(router_url).await?;
     let database = Client::with_uri_str(mongo_url).await?.database("meteor");
-    let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database)));
+    let watcher = Watcher::new(database.clone());
+    let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database, watcher)));
 
     loop {
         // Get next ID.
