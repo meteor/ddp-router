@@ -151,7 +151,7 @@ pub fn is_supported(sort: Option<&Document>) -> bool {
             return false;
         }
 
-        matches!(direction, Bson::Int32(-1 | 1))
+        matches!(direction, Bson::Int32(-1 | 1) | Bson::Int64(-1 | 1))
     })
 }
 
