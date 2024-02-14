@@ -11,7 +11,8 @@
     Meteor.publish = function publishWithDDPRouter(name, fn) {
       Meteor.methods({
         [`__subscription__${name}`]() {
-          const maybeCursorOrCursors = fn.apply(this, arguments);
+          const context = { ...this, ready() {}, unblock() {} };
+          const maybeCursorOrCursors = fn.apply(context, arguments);
           const cursors =
             Array.isArray(maybeCursorOrCursors)
               ? maybeCursorOrCursors
@@ -20,7 +21,7 @@
               : [];
           const cursorDescriptions = cursors.map(cursor => cursor._cursorDescription);
           // Use BSON's EJSON instead of Meteor's one and return a string to make
-          // sure the latter won't interfere.;
+          // sure the latter won't interfere.
           return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
         },
       });
