@@ -31,7 +31,10 @@ async fn main() -> Result<(), Error> {
 
     let mut session_id_counter = 0;
     let listener = TcpListener::bind(router_url).await?;
-    let database = Client::with_uri_str(mongo_url).await?.database("meteor");
+    let database = Client::with_uri_str(mongo_url)
+        .await?
+        .default_database()
+        .expect("MONGO_URL did not specify the database");
     let watcher = Watcher::new(database.clone());
     let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database, watcher)));
 
