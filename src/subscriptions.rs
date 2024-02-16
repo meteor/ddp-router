@@ -6,7 +6,7 @@ use anyhow::{anyhow, Error};
 use mongodb::Database;
 use serde::Deserialize;
 use serde_json::{from_str, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use tokio::sync::Mutex;
 
@@ -15,15 +15,26 @@ pub struct Subscriptions {
     #[allow(clippy::type_complexity)]
     cursors_by_session: BTreeMap<usize, BTreeMap<String, Vec<Arc<Mutex<Cursor>>>>>,
     database: Database,
+    #[allow(clippy::struct_field_names)]
+    server_subscriptions: BTreeSet<String>,
     watcher: Arc<Mutex<Watcher>>,
 }
 
 impl Subscriptions {
+    pub fn add_server_subscription(&mut self, subscription: String) {
+        self.server_subscriptions.insert(subscription);
+    }
+
+    pub fn is_server_subscription(&self, subscription: &str) -> bool {
+        self.server_subscriptions.contains(subscription)
+    }
+
     pub fn new(database: Database, watcher: Watcher) -> Self {
         Self {
             cursors_by_collection: BTreeMap::default(),
             cursors_by_session: BTreeMap::default(),
             database,
+            server_subscriptions: BTreeSet::default(),
             watcher: Arc::new(Mutex::new(watcher)),
         }
     }

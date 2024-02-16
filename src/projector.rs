@@ -34,6 +34,7 @@ impl Projector {
 
         for (path, operator) in projection {
             let include = match operator {
+                Bson::Boolean(boolean) => *boolean,
                 Bson::Int32(1) => true,
                 Bson::Int32(0) => false,
                 operator => {
