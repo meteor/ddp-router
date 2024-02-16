@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use crate::ejson::into_ejson;
 use crate::sorter::{cmp_value, cmp_value_partial, value_type};
 use anyhow::{anyhow, Error};
-use bson::{Bson, Document};
+use bson::{Bson, Document, Regex as BsonRegex};
+use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
 
 #[derive(Debug)]
@@ -134,7 +135,7 @@ impl BranchedMatcher {
     fn compile_operator(
         operator: &str,
         operand: &Bson,
-        _selector: &Bson,
+        selector: &Document,
         _is_root: bool,
     ) -> Result<Self, Error> {
         match operator {
@@ -150,7 +151,7 @@ impl BranchedMatcher {
                     operands
                         .iter()
                         .map(|operand| {
-                            if is_operator_object(operand) {
+                            if is_operator_object(operand).is_some() {
                                 Err(anyhow!("$all expected plain document, got {operand:?}"))
                             } else {
                                 Ok(ElementMatcher::compile(operand)?.into_branched(false, false))
@@ -189,7 +190,7 @@ impl BranchedMatcher {
                     .ok_or_else(|| anyhow!("$in expected an array, got {operand:?}"))?
                     .iter()
                     .map(|operand| {
-                        if is_operator_object(operand) {
+                        if is_operator_object(operand).is_some() {
                             Err(anyhow!("$in expected plain document, got {operand:?}"))
                         } else {
                             Ok(ElementMatcher::compile(operand)?.into_branched(false, false))
@@ -219,9 +220,39 @@ impl BranchedMatcher {
 
                 Ok(ElementMatcher::Mod(div, rem).into_branched(false, false))
             }
-            "$ne" => Self::compile_operator("$eq", operand, _selector, _is_root).map(Self::invert),
-            "$nin" => Self::compile_operator("$in", operand, _selector, _is_root).map(Self::invert),
+            "$ne" => Self::compile_operator("$eq", operand, selector, _is_root).map(Self::invert),
+            "$nin" => Self::compile_operator("$in", operand, selector, _is_root).map(Self::invert),
             "$not" => Self::compile_value_selector(operand, false).map(Self::invert),
+            "$regex" => {
+                let (pattern, options) = match operand {
+                    Bson::RegularExpression(regex) => {
+                        (regex.pattern.to_owned(), regex.options.as_str())
+                    }
+                    Bson::String(pattern) => (pattern.to_owned(), ""),
+                    operand => {
+                        return Err(anyhow!(
+                            "$regex expected a regex or string, got {operand:?}"
+                        ))
+                    }
+                };
+
+                let options = selector
+                    .get("$options")
+                    .map_or_else(
+                        || Ok(options),
+                        |options| {
+                            options.as_str().ok_or_else(|| {
+                                anyhow!("$options expected a string, got {options:?}")
+                            })
+                        },
+                    )?
+                    .to_owned();
+
+                let regex = BsonRegex { pattern, options };
+                Self::compile_value_selector(&Bson::RegularExpression(regex), false)
+            }
+            // TODO: This could be optimized out.
+            "$options" if selector.contains_key("$regex") => Ok(Self::Never.invert()),
             "$size" => {
                 let size: usize = match operand {
                     // TODO: Can we make it safe?
@@ -269,11 +300,9 @@ impl BranchedMatcher {
     }
 
     fn compile_value_selector(selector: &Bson, is_root: bool) -> Result<Self, Error> {
-        if is_operator_object(selector) {
+        if let Some(selector) = is_operator_object(selector) {
             Ok(Self::all(
                 selector
-                    .as_document()
-                    .ok_or_else(|| anyhow!(", got {selector:?}"))?
                     .iter()
                     .map(|(operator, operand)| {
                         Self::compile_operator(operator, operand, selector, is_root)
@@ -329,6 +358,7 @@ enum ElementMatcher {
         ordering: Ordering,
         is_negated: bool,
     },
+    Regex(Regex, Value),
     Size(usize),
     Type(i8),
     Value(Value),
@@ -354,10 +384,25 @@ impl ElementMatcher {
             | Bson::JavaScriptCodeWithScope(_)
             | Bson::MaxKey
             | Bson::MinKey
-            | Bson::RegularExpression(_)
             | Bson::Symbol(_)
             | Bson::Timestamp(_)
             | Bson::Undefined => Err(anyhow!("Selector not supported: {selector:?}")),
+            Bson::RegularExpression(regex) => {
+                let mut regex_builder = RegexBuilder::new(&regex.pattern);
+                for flag in regex.options.chars() {
+                    match flag {
+                        'i' => regex_builder.case_insensitive(true),
+                        'm' => regex_builder.multi_line(true),
+                        's' => regex_builder.dot_matches_new_line(true),
+                        'x' => regex_builder.ignore_whitespace(true),
+                        flag => return Err(anyhow!("Unknown $regex flag {flag}")),
+                    };
+                }
+
+                let regex = regex_builder.build()?;
+                let ejson = into_ejson(selector.clone());
+                Ok(Self::Regex(regex, ejson))
+            }
         }
     }
 
@@ -393,6 +438,11 @@ impl ElementMatcher {
                 let result = cmp_value_partial(value, selector);
                 result.is_ok_and(|result| result == *ordering) != *is_negated
             }
+            Self::Regex(regex, ejson) => maybe_value.is_some_and(|value| match value {
+                Value::Object(_) => value == ejson,
+                Value::String(string) => regex.is_match(string),
+                _ => false,
+            }),
             Self::Size(size) => maybe_value
                 .and_then(Value::as_array)
                 .is_some_and(|array| array.len() == *size),
@@ -530,8 +580,8 @@ fn is_indexable(value: &Value) -> bool {
     matches!(value, Value::Array(_) | Value::Object(_))
 }
 
-fn is_operator_object(selector: &Bson) -> bool {
-    selector.as_document().is_some_and(|selector| {
+fn is_operator_object(selector: &Bson) -> Option<&Document> {
+    selector.as_document().filter(|selector| {
         selector
             .keys()
             .next()
@@ -552,6 +602,18 @@ mod tests {
     use crate::ejson::into_ejson_document;
     use bson::oid::ObjectId;
     use bson::{doc, Binary, DateTime, Regex};
+
+    macro_rules! regex {
+        ($pattern:expr) => {
+            regex!($pattern, "")
+        };
+        ($pattern:expr, $options:expr) => {
+            Regex {
+                pattern: $pattern.to_owned(),
+                options: $options.to_owned(),
+            }
+        };
+    }
 
     macro_rules! test {
         ($name:ident, { $($selector:tt)* }, { $($document:tt)* }, $expected:expr) => {
@@ -676,6 +738,44 @@ mod tests {
     n!(object_14, {"a": {"b": 12, "c": 20}}, {"a": [{"b": 11}, {"b": 12}, {"c": 20}]});
     y!(object_15, {"a": {"b": 12, "c": 20}}, {"a": [{"b": 11}, {"b": 12, "c": 20}, {"b": 13}]});
 
+    // Regex.
+    y!(regex_01, {"a": regex!("a") }, {"a": "cat"});
+    n!(regex_02, {"a": regex!("a") }, {"a": "cut"});
+    n!(regex_03, {"a": regex!("a") }, {"a": "CAT"});
+    y!(regex_04, {"a": regex!("a", "i") }, {"a": "CAT"});
+    y!(regex_05, {"a": regex!("a") }, {"a": ["foo", "bar"]});
+    n!(regex_06, {"a": regex!(",") }, {"a": ["foo", "bar"]});
+    y!(regex_07, {"a": {"$regex": "a"}}, {"a": ["foo", "bar"]});
+    n!(regex_08, {"a": {"$regex": ","}}, {"a": ["foo", "bar"]});
+    y!(regex_09, {"a": {"$regex": regex!("a") }}, {"a": "cat"});
+    n!(regex_10, {"a": {"$regex": regex!("a") }}, {"a": "cut"});
+    n!(regex_11, {"a": {"$regex": regex!("a") }}, {"a": "CAT"});
+    y!(regex_12, {"a": {"$regex": regex!("a", "i") }}, {"a": "CAT"});
+    y!(regex_13, {"a": {"$regex": regex!("a"), "$options": "i"}}, {"a": "CAT"});
+    y!(regex_14, {"a": {"$regex": regex!("a", "i"), "$options": "i"}}, {"a": "CAT"});
+    n!(regex_15, {"a": {"$regex": regex!("a", "i"), "$options": ""}}, {"a": "CAT"});
+    y!(regex_16, {"a": {"$regex": "a"}}, {"a": "cat"});
+    n!(regex_17, {"a": {"$regex": "a"}}, {"a": "cut"});
+    n!(regex_18, {"a": {"$regex": "a"}}, {"a": "CAT"});
+    y!(regex_19, {"a": {"$regex": "a", "$options": "i"}}, {"a": "CAT"});
+    y!(regex_20, {"a": {"$regex": "", "$options": "i"}}, {"a": "foo"});
+    n!(regex_21, {"a": {"$regex": "", "$options": "i"}}, {});
+    n!(regex_22, {"a": {"$regex": "", "$options": "i"}}, {"a": 5});
+    n!(regex_23, {"a": regex!("undefined") }, {});
+    n!(regex_24, {"a": {"$regex": "undefined"}}, {});
+    n!(regex_25, {"a": regex!("xxx") }, {});
+    n!(regex_26, {"a": {"$regex": "xxx"}}, {});
+    y!(regex_27, {"a": regex!("a")}, {"a": ["dog", "cat"]});
+    n!(regex_28, {"a": regex!("a")}, {"a": ["dog", "puppy"]});
+    y!(regex_29, {"a": regex!("a")}, {"a": regex!("a")});
+    y!(regex_30, {"a": regex!("a")}, {"a": ["x", regex!("a")]});
+    n!(regex_31, {"a": regex!("a")}, {"a": regex!("a", "i")});
+    n!(regex_32, {"a": regex!("a", "m")}, {"a": regex!("a")});
+    n!(regex_33, {"a": regex!("a")}, {"a": regex!("b")});
+    n!(regex_34, {"a": regex!("5")}, {"a": 5});
+    n!(regex_35, {"a": regex!("t")}, {"a": true});
+    y!(regex_36, {"a": regex!("m", "i")}, {"a": ["x", "xM"]});
+
     // Nested paths.
     y!(nested_01, {"a.b": 1}, {"a": {"b": 1}});
     n!(nested_02, {"a.b": 1}, {"a": {"b": 2}});
@@ -727,6 +827,8 @@ mod tests {
     y!(nested_48, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"c": 1, "d": 2}}});
     n!(nested_49, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"c": 1, "d": 1}}});
     n!(nested_50, {"a.b": {"c": 1, "d": 2}}, {"a": {"b": {"d": 2}}});
+    y!(nested_51, {"a.b": regex!("a")}, {"a": {"b": "cat"}});
+    n!(nested_52, {"a.b": regex!("a")}, {"a": {"b": "dog"}});
 
     // $all.
     y!(operator_all_01, {"a": {"$all": [1, 2]}}, {"a": [1, 2]});
@@ -749,15 +851,21 @@ mod tests {
     f!(operator_all_18, {"a": {"$all": [{"$gt": 4}]}});
 
     // $and.
-    y!(operator_and_1, {"$and": [{"a": 1}]}, {"a": 1});
-    n!(operator_and_2, {"$and": [{"a": 1}, {"a": 2}]}, {"a": 1});
-    n!(operator_and_3, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1});
-    y!(operator_and_4, {"$and": [{"a": 1}, {"b": 2}]}, {"a": 1, "b": 2});
-    n!(operator_and_5, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1, "b": 2});
-    y!(operator_and_6, {"$and": [{"a": 1}, {"b": 2}], "c": 3}, {"a": 1, "b": 2, "c": 3});
-    n!(operator_and_7, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
-    f!(operator_and_8, {"$and": []});
-    f!(operator_and_9, {"$and": [5]});
+    y!(operator_and_01, {"$and": [{"a": 1}]}, {"a": 1});
+    n!(operator_and_02, {"$and": [{"a": 1}, {"a": 2}]}, {"a": 1});
+    n!(operator_and_03, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1});
+    y!(operator_and_04, {"$and": [{"a": 1}, {"b": 2}]}, {"a": 1, "b": 2});
+    n!(operator_and_05, {"$and": [{"a": 1}, {"b": 1}]}, {"a": 1, "b": 2});
+    y!(operator_and_06, {"$and": [{"a": 1}, {"b": 2}], "c": 3}, {"a": 1, "b": 2, "c": 3});
+    n!(operator_and_07, {"$and": [{"a": 1}, {"b": 2}], "c": 4}, {"a": 1, "b": 2, "c": 3});
+    f!(operator_and_08, {"$and": []});
+    f!(operator_and_09, {"$and": [5]});
+    y!(operator_and_10, {"$and": [{"a": regex!("a")}]}, {"a": "cat"});
+    y!(operator_and_11, {"$and": [{"a": regex!("a", "i")}]}, {"a": "CAT"});
+    n!(operator_and_12, {"$and": [{"a": regex!("o")}]}, {"a": "cat"});
+    n!(operator_and_13, {"$and": [{"a": regex!("a")}, {"a": regex!("o")}]}, {"a": "cat"});
+    y!(operator_and_14, {"$and": [{"a": regex!("a")}, {"b": regex!("o")}]}, {"a": "cat", "b": "dog"});
+    n!(operator_and_15, {"$and": [{"a": regex!("a")}, {"b": regex!("a")}]}, {"a": "cat", "b": "dog"});
 
     // $comment.
     y!(operator_comment_1, {"a": 5, "$comment": "Some text..."}, {"a": 5});
@@ -909,16 +1017,27 @@ mod tests {
     y!(operator_nin_23, {"a.b": {"$nin": [1, null]}}, {"a": [{"b": 5}, []]});
     y!(operator_nin_24, {"a.b": {"$nin": [1, null]}}, {"a": [{"b": 5}, 5]});
 
+    // $nor.
+    n!(operator_nor_1, {"$nor": [{"a": regex!("a")}]}, {"a": "cat"});
+    y!(operator_nor_2, {"$nor": [{"a": regex!("o")}]}, {"a": "cat"});
+    n!(operator_nor_3, {"$nor": [{"a": regex!("a")}, {"a": regex!("o")}]}, {"a": "cat"});
+    y!(operator_nor_4, {"$nor": [{"a": regex!("i")}, {"a": regex!("o")}]}, {"a": "cat"});
+    n!(operator_nor_5, {"$nor": [{"a": regex!("i")}, {"b": regex!("o")}]}, {"a": "cat", "b": "dog"});
+
     // $not.
-    y!(operator_not_1, {"x": {"$not": {"$gt": 7}}}, {"x": 6});
-    n!(operator_not_2, {"x": {"$not": {"$gt": 7}}}, {"x": 8});
-    y!(operator_not_3, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 11});
-    n!(operator_not_4, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 9});
-    y!(operator_not_5, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 6});
-    y!(operator_not_6, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4]});
-    y!(operator_not_7, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}]});
-    n!(operator_not_8, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4, 10]});
-    n!(operator_not_9, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}, {"y": 10}]});
+    y!(operator_not_01, {"x": {"$not": {"$gt": 7}}}, {"x": 6});
+    n!(operator_not_02, {"x": {"$not": {"$gt": 7}}}, {"x": 8});
+    y!(operator_not_03, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 11});
+    n!(operator_not_04, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 9});
+    y!(operator_not_05, {"x": {"$not": {"$lt": 10, "$gt": 7}}}, {"x": 6});
+    y!(operator_not_06, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4]});
+    y!(operator_not_07, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}]});
+    n!(operator_not_08, {"x": {"$not": {"$gt": 7}}}, {"x": [2, 3, 4, 10]});
+    n!(operator_not_09, {"x.y": {"$not": {"$gt": 7}}}, {"x": [{"y": 2}, {"y": 3}, {"y": 4}, {"y": 10}]});
+    y!(operator_not_10, {"x": {"$not": regex!("a")}}, {"x": "dog"});
+    n!(operator_not_11, {"x": {"$not": regex!("a")}}, {"x": "cat"});
+    y!(operator_not_12, {"x": {"$not": regex!("a")}}, {"x": ["dog", "puppy"]});
+    n!(operator_not_13, {"x": {"$not": regex!("a")}}, {"x": ["kitten", "cat"]});
 
     // $or.
     y!(operator_or_01, {"$or": [{"a": 1}]}, {"a": 1});
@@ -940,6 +1059,11 @@ mod tests {
     n!(operator_or_17, {"$or": [{"a": {"b": 1, "c": 3}}, {"a": {"b": 2, "c": 1}}]}, {"a": {"b": 1, "c": 2}});
     f!(operator_or_18, {"$or": []});
     f!(operator_or_19, {"$or": [5]});
+    y!(operator_or_20, {"$or": [{"a": regex!("a")}]}, {"a": "cat"});
+    n!(operator_or_21, {"$or": [{"a": regex!("o")}]}, {"a": "cat"});
+    y!(operator_or_22, {"$or": [{"a": regex!("a")}, {"a": regex!("o")}]}, {"a": "cat"});
+    n!(operator_or_23, {"$or": [{"a": regex!("i")}, {"a": regex!("o")}]}, {"a": "cat"});
+    y!(operator_or_24, {"$or": [{"a": regex!("i")}, {"b": regex!("o")}]}, {"a": "cat", "b": "dog"});
 
     // $size.
     y!(operator_size_01, {"a": {"$size": 0}}, {"a": []});
@@ -992,8 +1116,8 @@ mod tests {
     n!(operator_type_36, {"a": {"$type": 10}}, {"a": ""});
     n!(operator_type_37, {"a": {"$type": 10}}, {"a": 0});
     n!(operator_type_38, {"a": {"$type": 10}}, {});
-    y!(operator_type_39, {"a": {"$type": 11}}, {"a": Regex { pattern: "x".to_owned(), options: "".to_owned() }});
-    y!(operator_type_40, {"a": {"$type": "regex"}}, {"a": Regex { pattern: "x".to_owned(), options: "".to_owned() }});
+    y!(operator_type_39, {"a": {"$type": 11}}, {"a": regex!("x") });
+    y!(operator_type_40, {"a": {"$type": "regex"}}, {"a": regex!("x") });
     n!(operator_type_41, {"a": {"$type": 11}}, {"a": "x"});
     n!(operator_type_42, {"a": {"$type": 11}}, {});
     n!(operator_type_43, {"a": {"$type": 4}}, {"a": []});
