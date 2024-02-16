@@ -1,38 +1,21 @@
 use anyhow::{anyhow, Error};
 use bson::{Bson, Document};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
-pub enum Projector {
-    Empty,
-    Exclude(Vec<String>),
-    Include(Vec<String>),
-}
+pub struct Projector(Tree, bool);
 
 impl Projector {
-    pub fn apply(&self, mut document: Map<String, Value>) -> Map<String, Value> {
-        match self {
-            Self::Empty => document,
-            Self::Exclude(paths) => {
-                document.retain(|key, _| paths.binary_search(key).is_err());
-                document
-            }
-            Self::Include(paths) => {
-                document.retain(|key, _| paths.binary_search(key).is_ok());
-                document
-            }
-        }
+    pub fn apply(&self, document: &mut Map<String, Value>) {
+        self.0.apply_document(document, self.1);
     }
 
     pub fn compile(projection: Option<&Document>) -> Result<Self, Error> {
-        let Some(projection) = projection else {
-            return Ok(Self::Empty);
-        };
-
-        let mut paths = vec![];
+        let mut tree = Tree::default();
         let mut include_all = None;
         let mut include_id = None;
 
-        for (path, operator) in projection {
+        for (path, operator) in projection.into_iter().flatten() {
             let include = match operator {
                 Bson::Boolean(boolean) => *boolean,
                 Bson::Int32(1) => true,
@@ -48,10 +31,6 @@ impl Projector {
                 continue;
             }
 
-            if path.contains('.') {
-                return Err(anyhow!("Nested projections are not supported"));
-            }
-
             match include_all {
                 Some(include_all) => {
                     if include_all != include {
@@ -61,7 +40,7 @@ impl Projector {
                 None => include_all = Some(include),
             }
 
-            paths.push(path.clone());
+            tree.add(path.as_str());
         }
 
         match (include_all, include_id) {
@@ -71,16 +50,58 @@ impl Projector {
         }
 
         if include_all == include_id {
-            paths.push("_id".to_owned());
+            tree.add("_id");
         }
 
-        paths.sort_unstable();
+        Ok(Self(tree, include_all.unwrap_or(false)))
+    }
+}
 
-        Ok(match include_all {
-            Some(true) => Self::Include(paths),
-            Some(false) => Self::Exclude(paths),
-            None => Self::Empty,
-        })
+#[derive(Default)]
+enum Tree {
+    #[default]
+    Leaf,
+    Node(BTreeMap<String, Tree>),
+}
+
+impl Tree {
+    fn add(&mut self, key: &str) {
+        let map = match self {
+            Self::Leaf => {
+                *self = Self::Node(BTreeMap::new());
+                return self.add(key);
+            }
+            Self::Node(map) => map,
+        };
+
+        if let Some((key, path)) = key.split_once('.') {
+            map.entry(key.to_owned()).or_default().add(path);
+        } else {
+            map.entry(key.to_owned()).or_default();
+        }
+    }
+
+    fn apply_document(&self, document: &mut Map<String, Value>, include: bool) {
+        if let Self::Node(map) = self {
+            document.retain(|key, value| match map.get(key) {
+                Some(Self::Leaf) => include,
+                Some(tree) => {
+                    tree.apply_value(value, include);
+                    true
+                }
+                None => !include,
+            });
+        }
+    }
+
+    fn apply_value(&self, value: &mut Value, include: bool) {
+        match value {
+            Value::Array(values) => values
+                .iter_mut()
+                .for_each(|value| self.apply_value(value, include)),
+            Value::Object(value) => self.apply_document(value, include),
+            _ => {}
+        }
     }
 }
 
@@ -99,7 +120,7 @@ mod tests {
                 let output = json! {{ $($output)* }};
 
                 let projection = Some(&projection);
-                let Value::Object(input) = input else { unreachable!() };
+                let Value::Object(mut input) = input else { unreachable!() };
                 let Value::Object(output) = output else { unreachable!() };
 
                 let projector = match Projector::compile(projection) {
@@ -107,7 +128,8 @@ mod tests {
                     Err(error) => panic!("{projection:?} is not supported: {error:?}"),
                 };
 
-                assert_eq!(projector.apply(input), output);
+                projector.apply(&mut input);
+                assert_eq!(input, output);
             }
         };
     }
@@ -127,4 +149,16 @@ mod tests {
     test!(include_4, {"a": 1}, {"a": 7, "b": 8, "_id": 9}, {"a": 7, "_id": 9});
     test!(include_5, {"a": 1, "_id": 0}, {"a": 7, "b": 8, "_id": 9}, {"a": 7});
     test!(include_6, {"a": 1, "_id": 1}, {"a": 7, "b": 8, "_id": 9}, {"a": 7, "_id": 9});
+
+    test!(nested_01, {"a.b.c": 1}, {}, {});
+    test!(nested_02, {"a.b.c": 1}, {"a": []}, {"a": []});
+    test!(nested_03, {"a.b.c": 1}, {"a": {}}, {"a": {}});
+    test!(nested_04, {"a.b.c": 1}, {"a": {"b": []}}, {"a": {"b": []}});
+    test!(nested_05, {"a.b.c": 1}, {"a": {"b": {}}}, {"a": {"b": {}}});
+    test!(nested_06, {"a.b.c": 1}, {"a": {"b": {"c": 7}}}, {"a": {"b": {"c": 7}}});
+    test!(nested_07, {"a.b.c": 1}, {"a": {"b": {"c": 7}, "c": 8}, "d": 9}, {"a": {"b": {"c": 7}}});
+    test!(nested_08, {"a.b.c": 1}, {"a": {"b": {"c": [7]}}}, {"a": {"b": {"c": [7]}}});
+    test!(nested_09, {"a.b.c": 1}, {"a": {"b": [{"c": 7}]}}, {"a": {"b": [{"c": 7}]}});
+    test!(nested_10, {"a.b.c": 1}, {"a": [{"b": {"c": 7}}]}, {"a": [{"b": {"c": 7}}]});
+    test!(nested_11, {"a.b.c": 0}, {"a": {"b": {"c": 7}, "c": 8}, "d": 9}, {"a": {"b": {}, "c": 8}, "d": 9});
 }

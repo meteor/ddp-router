@@ -258,7 +258,7 @@ impl CursorFetcher {
                     return OK;
                 }
 
-                document = self.projector.as_ref().unwrap().apply(document);
+                self.projector.as_ref().unwrap().apply(&mut document);
 
                 self.documents.push(document.clone());
                 let id = extract_id(&mut document)?;
@@ -275,7 +275,7 @@ impl CursorFetcher {
                     self.documents.push(document.clone());
                 }
 
-                document = self.projector.as_ref().unwrap().apply(document);
+                self.projector.as_ref().unwrap().apply(&mut document);
 
                 let id = extract_id(&mut document)?;
                 if is_matching {
