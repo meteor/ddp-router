@@ -33,7 +33,7 @@
     * Make sure to exclude all low-level publications (i.e., ones that use `this.added` and similar APIs directly) and other publish-like packages (e.g., publish composite).
 1. Start Meteor with two additional flags:
     * `DISABLE_SOCKJS=true` to disable the SockJS communication format and additional handshakes.
-    * `DDP_DEFAULT_CONNECTION_URL=http://127.0.0.1:4000` to make the browser connect through the DDP Router.
+    * `DDP_DEFAULT_CONNECTION_URL=127.0.0.1:4000` to make the browser connect through the DDP Router.
 1. Start DDP Router:
     * Provide required configuration:
         * `METEOR_URL`, e.g., `ws://127.0.0.1:3000/websocket`.
