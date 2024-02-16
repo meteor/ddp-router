@@ -14,10 +14,9 @@ mod watcher;
 use crate::subscriptions::Subscriptions;
 
 use anyhow::Error;
-use dotenvy::dotenv;
+use config::Config;
 use mongodb::Client;
 use session::start_session;
-use std::env::var;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -27,11 +26,22 @@ use watcher::Watcher;
 
 #[main]
 async fn main() -> Result<(), Error> {
-    // It is ok if .env file is not present.
-    dotenv().ok();
-    let meteor_url = var("METEOR_URL").expect("METEOR_URL is required");
-    let mongo_url = var("MONGO_URL").expect("MONGO_URL is required");
-    let router_url = var("ROUTER_URL").expect("ROUTER_URL is required");
+    let settings = Config::builder()
+        .add_source(config::File::with_name("./config/Default"))
+        .add_source(config::File::with_name("./config/Local").required(false))
+        .build()?;
+
+    let meteor_url = settings
+        .get_string("METEOR_URL")
+        .expect("METEOR_URL is required");
+
+    let mongo_url = settings
+        .get_string("MONGO_URL")
+        .expect("MONGO_URL is required");
+
+    let router_url = settings
+        .get_string("ROUTER_URL")
+        .expect("ROUTER_URL is required");
 
     println!("\x1b[0;36m Starting DDP-router at:\x1b[0m {} ", router_url);
 
