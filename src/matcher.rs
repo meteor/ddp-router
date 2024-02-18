@@ -1,11 +1,11 @@
-use std::cmp::Ordering;
-
 use crate::ejson::into_ejson;
-use crate::sorter::{cmp_value, cmp_value_partial, value_type};
+use crate::lookup::{Branch, Lookup};
+use crate::sorter::Sorter;
 use anyhow::{anyhow, Error};
 use bson::{Bson, Document, Regex as BsonRegex};
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub enum DocumentMatcher {
@@ -14,7 +14,7 @@ pub enum DocumentMatcher {
     Invert(Box<Self>),
     Lookup {
         #[allow(private_interfaces)]
-        lookup: ValueLookup,
+        lookup: Lookup,
         #[allow(private_interfaces)]
         matcher: BranchedMatcher,
     },
@@ -47,7 +47,7 @@ impl DocumentMatcher {
                         Self::compile_logical_operator(key, sub_selector, is_in_elem_match)
                     } else {
                         Ok(Self::Lookup {
-                            lookup: ValueLookup::new(key.to_owned(), false),
+                            lookup: Lookup::new(key.to_owned(), false),
                             matcher: BranchedMatcher::compile_value_selector(
                                 sub_selector,
                                 is_root,
@@ -321,7 +321,7 @@ impl BranchedMatcher {
         }
     }
 
-    fn matches(&self, branches: Vec<ValueBranch>) -> bool {
+    fn matches(&self, branches: Vec<Branch>) -> bool {
         match &self {
             Self::All(matchers) => matchers
                 .iter()
@@ -336,7 +336,7 @@ impl BranchedMatcher {
             } => {
                 let mut expanded = branches;
                 if !*dont_expand_leaf_arrays {
-                    expanded = ValueBranch::expand(expanded, *dont_include_leaf_arrays);
+                    expanded = Branch::expand(expanded, *dont_include_leaf_arrays);
                 }
 
                 expanded
@@ -435,7 +435,7 @@ impl ElementMatcher {
                 is_negated,
             } => {
                 let value = maybe_value.unwrap_or(&Value::Null);
-                let result = cmp_value_partial(value, selector);
+                let result = Sorter::cmp_value_partial(value, selector);
                 result.is_ok_and(|result| result == *ordering) != *is_negated
             }
             Self::Regex(regex, ejson) => maybe_value.is_some_and(|value| match value {
@@ -447,137 +447,14 @@ impl ElementMatcher {
                 .and_then(Value::as_array)
                 .is_some_and(|array| array.len() == *size),
             Self::Type(type_) => maybe_value
-                .map(value_type)
+                .map(Sorter::value_type)
                 .is_some_and(|value_type| value_type == *type_),
             Self::Value(Value::Null) => maybe_value.map_or(true, Value::is_null),
             Self::Value(selector) => {
-                maybe_value.is_some_and(|value| cmp_value(selector, value).is_eq())
+                maybe_value.is_some_and(|value| Sorter::cmp_value(selector, value).is_eq())
             }
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct ValueBranch<'a> {
-    dont_iterate: bool,
-    value: Option<&'a Value>,
-}
-
-impl ValueBranch<'_> {
-    fn expand(branches: Vec<Self>, skip_the_arrays: bool) -> Vec<Self> {
-        let mut branches_out = vec![];
-        for branch in branches {
-            let this_is_array = branch.value.is_some_and(Value::is_array);
-            if !(skip_the_arrays && this_is_array && !branch.dont_iterate) {
-                branches_out.push(branch.clone());
-            }
-
-            if this_is_array && !branch.dont_iterate {
-                for value in branch.value.unwrap().as_array().unwrap() {
-                    branches_out.push(Self {
-                        value: Some(value),
-                        dont_iterate: false,
-                    });
-                }
-            }
-        }
-
-        branches_out
-    }
-}
-
-#[derive(Debug)]
-struct ValueLookup {
-    for_sort: bool,
-    key_head: String,
-    key_head_usize: Option<usize>,
-    key_next_usize: bool,
-    lookup_rest: Option<Box<ValueLookup>>,
-}
-
-impl ValueLookup {
-    fn lookup<'a>(&'a self, value: &'a Value) -> Vec<ValueBranch> {
-        let Self {
-            for_sort,
-            key_head,
-            key_head_usize,
-            key_next_usize,
-            lookup_rest,
-        } = &self;
-
-        if let Value::Array(values) = value {
-            if !key_head_usize.is_some_and(|index| index < values.len()) {
-                return vec![];
-            }
-        }
-
-        let value_head = match value {
-            Value::Array(values) => key_head_usize.and_then(|index| values.get(index)),
-            Value::Object(values) => values.get(key_head),
-            _ => None,
-        };
-
-        let Some(lookup_rest) = lookup_rest else {
-            return vec![ValueBranch {
-                value: value_head,
-                dont_iterate: value.is_array() && value_head.is_some_and(Value::is_array),
-            }];
-        };
-
-        let Some(value_head) = value_head.filter(|value_head| is_indexable(value_head)) else {
-            return if value.is_array() {
-                vec![]
-            } else {
-                vec![ValueBranch {
-                    value: None,
-                    dont_iterate: false,
-                }]
-            };
-        };
-
-        let mut result = lookup_rest.lookup(value_head);
-
-        if !(*key_next_usize && *for_sort) {
-            if let Value::Array(branches) = value_head {
-                for branch in branches {
-                    // TODO: Exclude BSON-specific types.
-                    if branch.is_object() {
-                        result.extend(lookup_rest.lookup(branch));
-                    }
-                }
-            }
-        }
-
-        result
-    }
-
-    fn new(key: String, for_sort: bool) -> Self {
-        let (key_head, key_next_usize, lookup_rest) = match key.split_once('.') {
-            Some((key_head, key_rest)) => (
-                key_head.to_owned(),
-                key_rest
-                    .split_once('.')
-                    .map_or(key_rest, |(key_next, _)| key_next)
-                    .parse::<usize>()
-                    .is_ok(),
-                Some(Box::new(Self::new(key_rest.to_owned(), for_sort))),
-            ),
-            None => (key, false, None),
-        };
-        let key_head_usize = key_head.parse::<usize>().ok();
-
-        Self {
-            for_sort,
-            key_head,
-            key_head_usize,
-            key_next_usize,
-            lookup_rest,
-        }
-    }
-}
-
-fn is_indexable(value: &Value) -> bool {
-    matches!(value, Value::Array(_) | Value::Object(_))
 }
 
 fn is_operator_object(selector: &Bson) -> Option<&Document> {

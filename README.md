@@ -71,6 +71,7 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
 * **A limited support for real-time database updates.** If DDP Router can fully understand the query (including its projection, sorting, etc.) then it'll runt a Change Stream. If not, it'll fall back to pooling instead.
     * Missing query operators: `$bitsAllClear`, `$bitsAllSet`, `$bitsAnyClear`, `$bitsAnySet`, `$elemMatch`, and `$where` (not possible).
     * No projection operators.
+    * No sorting on parallel dotted paths (e.g., `{'a.x': 1, 'a.y': 1}`).
     * No `limit` and `skip`.
 * **Collections with `ObjectId` in the `_id` field.** It looks like Meteor does not use `EJSON` for serializing the `_id` field, but DDP Router does. Instead of patching the DDP Router, patch the Meteor app using the following code:
     ```ts

@@ -3,7 +3,7 @@ use crate::ejson::into_ejson_document;
 use crate::matcher::DocumentMatcher;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::projector::Projector;
-use crate::sorter as Sorter;
+use crate::sorter::Sorter;
 use crate::watcher::{Event, Watcher};
 use anyhow::{anyhow, Error};
 use bson::{doc, Document};
@@ -155,6 +155,7 @@ pub struct CursorFetcher {
     documents: Vec<Map<String, Value>>,
     matcher: Option<DocumentMatcher>,
     projector: Option<Projector>,
+    sorter: Option<Sorter>,
     watcher: Arc<Mutex<Watcher>>,
 }
 
@@ -214,6 +215,7 @@ impl CursorFetcher {
             documents: Vec::default(),
             matcher: None,
             projector: None,
+            sorter: None,
             watcher,
         }
     }
@@ -335,7 +337,7 @@ impl CursorFetcher {
                 );
                 return Ok(None);
             }
-        };
+        }
 
         match Projector::compile(projection.as_ref()) {
             Ok(projector) => self.projector = Some(projector),
@@ -347,9 +349,14 @@ impl CursorFetcher {
             }
         }
 
-        if !Sorter::is_supported(sort.as_ref()) {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31msort {sort:?} not supported\x1b[0m",);
-            return Ok(None);
+        match Sorter::compile(sort.as_ref()) {
+            Ok(sorter) => self.sorter = Some(sorter),
+            Err(error) => {
+                println!(
+                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31msort {sort:?} is not supported: {error}\x1b[0m",
+                );
+                return Ok(None);
+            }
         }
 
         // TODO: Implement top-N logic.

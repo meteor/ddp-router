@@ -3,6 +3,7 @@ mod ddp;
 mod drop_handle;
 mod ejson;
 mod inflights;
+mod lookup;
 mod matcher;
 mod mergebox;
 mod projector;
