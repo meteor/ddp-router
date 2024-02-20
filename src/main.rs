@@ -27,7 +27,6 @@ use watcher::Watcher;
 #[main]
 async fn main() -> Result<(), Error> {
     let settings = Settings::from("./config")?;
-    println!("{settings:?}");
     println!("\x1b[0;33mrouter\x1b[0m Started at {}", settings.router.url);
 
     let mut session_id_counter = 0;
