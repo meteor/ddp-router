@@ -35,11 +35,7 @@
     * `DISABLE_SOCKJS=true` to disable the SockJS communication format and additional handshakes.
     * `DDP_DEFAULT_CONNECTION_URL=127.0.0.1:4000` to make the browser connect through the DDP Router.
 1. Start DDP Router:
-    * Provide required configuration:
-        * `METEOR_URL`, e.g., `ws://127.0.0.1:3000/websocket`.
-        * `MONGO_URL`, e.g., `mongodb://127.0.0.1:3001/?directConnection=true`.
-        * `ROUTER_URL`, e.g., `127.0.0.1:4000`.
-    * alternatively you can add a `Local.toml` in the `config` folder with your configurations
+    * Provide the required configuration in `config.toml` or in environmental variables.
     * `cargo run` starts it in a debug mode (add `--release` for release mode).
     * Alternatively, build it with `cargo build` and run manually.
 1. Use the Meteor app as normal.

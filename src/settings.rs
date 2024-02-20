@@ -1,38 +1,34 @@
-use config::{Config, ConfigError};
-use serde::{Deserialize};
+use config::{Config, ConfigError, Environment, File};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-#[allow(unused)]
-pub struct Database {
+pub struct Meteor {
     pub url: String,
 }
+
 #[derive(Debug, Deserialize)]
-#[allow(unused)]
+pub struct Mongo {
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Router {
     pub url: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(unused)]
-pub struct Meteor {
-   pub url: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(unused)]
 pub struct Settings {
-    pub database: Database,
-    pub router: Router,
     pub meteor: Meteor,
+    pub mongo: Mongo,
+    pub router: Router,
 }
 
 impl Settings {
-    pub fn new() -> Result<Self, ConfigError> {
-        let s = Config::builder()
-            .add_source(config::File::with_name("./config/Default"))
-            .add_source(config::File::with_name("./config/Local").required(false))
-            .build()?;
-
-        s.try_deserialize()
+    pub fn from(path: &str) -> Result<Self, ConfigError> {
+        Config::builder()
+            .add_source(File::with_name(path))
+            .add_source(Environment::default().separator("_"))
+            .build()?
+            .try_deserialize()
     }
 }

@@ -1,0 +1,3 @@
+meteor.url = "ws://127.0.0.1:3000/websocket"
+mongo.url = "mongodb://localhost:27017/meteor"
+router.url = "127.0.0.1:4000"
