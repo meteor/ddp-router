@@ -72,7 +72,7 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
     * Missing query operators: `$bitsAllClear`, `$bitsAllSet`, `$bitsAnyClear`, `$bitsAnySet`, `$elemMatch`, and `$where` (not possible).
     * No projection operators.
     * No sorting on parallel dotted paths (e.g., `{'a.x': 1, 'a.y': 1}`).
-    * No `limit` and `skip`.
+    * No `skip`. We _could_ support it, but we'll need to store `limit + skip` documents in memory anyway. Maybe make a configurable limit for it?
 * **Collections with `ObjectId` in the `_id` field.** It looks like Meteor does not use `EJSON` for serializing the `_id` field, but DDP Router does. Instead of patching the DDP Router, patch the Meteor app using the following code:
     ```ts
     import { MongoID } from 'meteor/mongo-id';

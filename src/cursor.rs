@@ -230,6 +230,7 @@ impl CursorFetcher {
                 let mut mergeboxes = mergeboxes.lock().await;
                 for mut document in take(&mut self.documents) {
                     let id = extract_id(&mut document)?;
+                    self.projector.as_ref().unwrap().apply(&mut document);
                     mergeboxes
                         .remove(self.description.collection.clone(), id, &document)
                         .await?;
@@ -239,15 +240,27 @@ impl CursorFetcher {
             Event::Delete(document) => {
                 let mut document = into_ejson_document(document);
                 let id = extract_id(&mut document)?;
-                let index = self
+                let Some(index) = self
                     .documents
                     .iter()
                     .position(|x| x.get("_id") == Some(&id))
-                    .ok_or_else(|| {
-                        anyhow!("Document {id} not found in {}", self.description.collection)
-                    })?;
+                else {
+                    return OK;
+                };
+
+                // TODO: Safe comparison.
+                if self
+                    .description
+                    .options
+                    .limit
+                    .is_some_and(|limit| limit.unsigned_abs() as usize == self.documents.len())
+                {
+                    return self.fetch(mergeboxes).await;
+                }
+
                 let mut document = self.documents.swap_remove(index);
                 document.remove("_id");
+                self.projector.as_ref().unwrap().apply(&mut document);
                 mergeboxes
                     .lock()
                     .await
@@ -260,41 +273,102 @@ impl CursorFetcher {
                     return OK;
                 }
 
-                self.projector.as_ref().unwrap().apply(&mut document);
+                if let Some(limit) = self.description.options.limit {
+                    let index = self
+                        .documents
+                        .binary_search_by(|x| self.sorter.as_ref().unwrap().cmp(x, &document))
+                        .unwrap_or_else(|index| index);
+                    // TODO: Safe comparison.
+                    if index == limit.unsigned_abs() as usize {
+                        return OK;
+                    }
 
-                self.documents.push(document.clone());
+                    self.documents.insert(index, document.clone());
+                } else {
+                    self.documents.push(document.clone());
+                }
+
                 let id = extract_id(&mut document)?;
+                self.projector.as_ref().unwrap().apply(&mut document);
+                let mut mergeboxes = mergeboxes.lock().await;
                 mergeboxes
-                    .lock()
-                    .await
                     .insert(self.description.collection.clone(), id, document)
-                    .await
+                    .await?;
+
+                if let Some(limit) = self.description.options.limit {
+                    // TODO: Safe comparison.
+                    if self.documents.len() > limit.unsigned_abs() as usize {
+                        if let Some(mut document) = self.documents.pop() {
+                            let id = extract_id(&mut document)?;
+                            self.projector.as_ref().unwrap().apply(&mut document);
+                            mergeboxes
+                                .remove(self.description.collection.clone(), id, &document)
+                                .await?;
+                        }
+                    }
+                }
+
+                OK
             }
             Event::Update(document) => {
                 let mut document = into_ejson_document(document);
                 let is_matching = self.matcher.as_ref().unwrap().matches(&document);
                 if is_matching {
-                    self.documents.push(document.clone());
-                }
+                    if let Some(limit) = self.description.options.limit {
+                        let index = self
+                            .documents
+                            .binary_search_by(|x| self.sorter.as_ref().unwrap().cmp(x, &document))
+                            .unwrap_or_else(|index| index);
+                        // TODO: Safe comparison.
+                        if index == limit.unsigned_abs() as usize {
+                            return OK;
+                        }
 
-                self.projector.as_ref().unwrap().apply(&mut document);
+                        self.documents.insert(index, document.clone());
+                    } else {
+                        self.documents.push(document.clone());
+                    }
 
-                let id = extract_id(&mut document)?;
-                if is_matching {
+                    let id = extract_id(&mut document)?;
+                    self.projector.as_ref().unwrap().apply(&mut document);
+                    let mut mergeboxes = mergeboxes.lock().await;
                     mergeboxes
-                        .lock()
-                        .await
                         .insert(self.description.collection.clone(), id.clone(), document)
                         .await?;
-                }
 
-                let maybe_index = self
-                    .documents
-                    .iter()
-                    .position(|x| x.get("_id") == Some(&id));
-                if let Some(index) = maybe_index {
+                    let maybe_index = self
+                        .documents
+                        .iter()
+                        .position(|x| x.get("_id") == Some(&id));
+                    if let Some(index) = maybe_index {
+                        let mut document = self.documents.swap_remove(index);
+                        document.remove("_id");
+                        mergeboxes
+                            .remove(self.description.collection.clone(), id, &document)
+                            .await?;
+                    }
+                } else {
+                    let id = extract_id(&mut document)?;
+                    let Some(index) = self
+                        .documents
+                        .iter()
+                        .position(|x| x.get("_id") == Some(&id))
+                    else {
+                        return OK;
+                    };
+
+                    // TODO: Safe comparison.
+                    if self
+                        .description
+                        .options
+                        .limit
+                        .is_some_and(|limit| limit.unsigned_abs() as usize == self.documents.len())
+                    {
+                        return self.fetch(mergeboxes).await;
+                    }
+
                     let mut document = self.documents.swap_remove(index);
-                    document.remove("_id");
+                    let id = extract_id(&mut document)?;
                     mergeboxes
                         .lock()
                         .await
@@ -359,9 +433,13 @@ impl CursorFetcher {
             }
         }
 
-        // TODO: Implement top-N logic.
-        if limit.is_some() || skip.is_some() {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit and skip are not supported\x1b[0m");
+        if limit.is_some() && sort.is_none() {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit without sort is not supported\x1b[0m");
+            return Ok(None);
+        }
+
+        if skip.is_some() {
+            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mskip is not supported\x1b[0m");
             return Ok(None);
         }
 
