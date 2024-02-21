@@ -13,8 +13,6 @@ use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-const OK: Result<(), Error> = Ok(());
-
 struct Session {
     id: usize,
     client_writer: Sender<DDPMessage>,
@@ -60,7 +58,7 @@ async fn process_message_client(session: &Session, ddp_message: DDPMessage) -> R
                     .register(id, Inflight::new(name, params));
             }
 
-            OK
+            Ok(())
         }
 
         // Intercept a client unsubscription of a router-managed subscription.
@@ -80,12 +78,12 @@ async fn process_message_client(session: &Session, ddp_message: DDPMessage) -> R
                 session.server_writer.send(ddp_message).await?;
             }
 
-            OK
+            Ok(())
         }
 
         _ => {
             session.server_writer.send(ddp_message).await?;
-            OK
+            Ok(())
         }
     }
 }
@@ -101,7 +99,7 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
             let mut inflights = session.inflights.lock().await;
             let Some(inflight) = inflights.process_result(id) else {
                 session.client_writer.send(ddp_message).await?;
-                return OK;
+                return Ok(());
             };
 
             let subscription_started = {
@@ -146,21 +144,21 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                 }
             }
 
-            OK
+            Ok(())
         }
 
         DDPMessage::Updated { mut methods } => {
             let mut inflights = session.inflights.lock().await;
             methods.retain(|id| !inflights.process_update(id));
             if methods.is_empty() {
-                return OK;
+                return Ok(());
             }
 
             session
                 .client_writer
                 .send(DDPMessage::Updated { methods })
                 .await?;
-            OK
+            Ok(())
         }
 
         // Track server subscriptions in mergebox.
@@ -203,7 +201,7 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
         // Pass-through other DDP messages.
         _ => {
             session.client_writer.send(ddp_message).await?;
-            OK
+            Ok(())
         }
     }
 }
@@ -217,7 +215,7 @@ async fn start_consumer_client(
         sink.send(ddp_message.try_into()?).await?;
     }
 
-    OK
+    Ok(())
 }
 
 async fn start_consumer_server(
@@ -229,7 +227,7 @@ async fn start_consumer_server(
         sink.send(ddp_message.try_into()?).await?;
     }
 
-    OK
+    Ok(())
 }
 
 async fn start_producer_client(
@@ -242,7 +240,7 @@ async fn start_producer_client(
         process_message_client(&session, ddp_message).await?;
     }
 
-    OK
+    Ok(())
 }
 
 async fn start_producer_server(
@@ -255,7 +253,7 @@ async fn start_producer_server(
         process_message_server(&session, ddp_message).await?;
     }
 
-    OK
+    Ok(())
 }
 
 pub async fn start_session(
@@ -301,5 +299,5 @@ pub async fn start_session(
         .stop_all(session.id, &session.mergebox)
         .await?;
     result??;
-    OK
+    Ok(())
 }

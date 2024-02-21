@@ -1,4 +1,4 @@
-use crate::cursor::{Cursor, CursorDescription, CursorFetcher};
+use crate::cursor::{Cursor, CursorDescription};
 use crate::inflights::Inflight;
 use crate::mergebox::Mergebox;
 use crate::watcher::Watcher;
@@ -123,8 +123,7 @@ impl Subscriptions {
         }
 
         // Create and start a new cursor.
-        let fetcher = CursorFetcher::new(self.database.clone(), description, self.watcher.clone());
-        let mut cursor = Cursor::from(fetcher);
+        let mut cursor = Cursor::new(self.database.clone(), description, self.watcher.clone());
         cursor.start(session_id, mergebox).await?;
 
         // Store a weak reference for faster lookups.
