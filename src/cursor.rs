@@ -19,6 +19,8 @@ use tokio::sync::broadcast::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::{interval_at, Duration, Instant, Interval};
 
+// TODO: The structure hierarchy and naming is just **terrible** here.
+
 const OK: Result<(), Error> = Ok(());
 
 pub struct Cursor {
@@ -153,9 +155,7 @@ pub struct CursorFetcher {
     database: Database,
     description: CursorDescription,
     documents: Vec<Map<String, Value>>,
-    matcher: Option<DocumentMatcher>,
-    projector: Option<Projector>,
-    sorter: Option<Sorter>,
+    viewer: Option<CursorViewer>,
     watcher: Arc<Mutex<Watcher>>,
 }
 
@@ -209,13 +209,19 @@ impl CursorFetcher {
         description: CursorDescription,
         watcher: Arc<Mutex<Watcher>>,
     ) -> Self {
+        let viewer = match CursorViewer::try_from(&description) {
+            Ok(viewer) => Some(viewer),
+            Err(error) => {
+                println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31m{error}\x1b[0m");
+                None
+            }
+        };
+
         Self {
             database,
             description,
             documents: Vec::default(),
-            matcher: None,
-            projector: None,
-            sorter: None,
+            viewer,
             watcher,
         }
     }
@@ -225,225 +231,28 @@ impl CursorFetcher {
         event: Event,
         mergeboxes: &Arc<Mutex<Mergeboxes>>,
     ) -> Result<(), Error> {
-        match event {
-            Event::Clear => {
-                let mut mergeboxes = mergeboxes.lock().await;
-                for mut document in take(&mut self.documents) {
-                    let id = extract_id(&mut document)?;
-                    self.projector.as_ref().unwrap().apply(&mut document);
-                    mergeboxes
-                        .remove(self.description.collection.clone(), id, &document)
-                        .await?;
-                }
-                OK
-            }
-            Event::Delete(document) => {
-                let mut document = into_ejson_document(document);
-                let id = extract_id(&mut document)?;
-                let Some(index) = self
-                    .documents
-                    .iter()
-                    .position(|x| x.get("_id") == Some(&id))
-                else {
-                    return OK;
-                };
-
-                // TODO: Safe comparison.
-                if self
-                    .description
-                    .options
-                    .limit
-                    .is_some_and(|limit| limit.unsigned_abs() as usize == self.documents.len())
-                {
-                    return self.fetch(mergeboxes).await;
-                }
-
-                let mut document = self.documents.swap_remove(index);
-                document.remove("_id");
-                self.projector.as_ref().unwrap().apply(&mut document);
-                mergeboxes
-                    .lock()
-                    .await
-                    .remove(self.description.collection.clone(), id, &document)
-                    .await
-            }
-            Event::Insert(document) => {
-                let mut document = into_ejson_document(document);
-                if !self.matcher.as_ref().unwrap().matches(&document) {
-                    return OK;
-                }
-
-                if let Some(limit) = self.description.options.limit {
-                    let index = self
-                        .documents
-                        .binary_search_by(|x| self.sorter.as_ref().unwrap().cmp(x, &document))
-                        .unwrap_or_else(|index| index);
-                    // TODO: Safe comparison.
-                    if index == limit.unsigned_abs() as usize {
-                        return OK;
-                    }
-
-                    self.documents.insert(index, document.clone());
-                } else {
-                    self.documents.push(document.clone());
-                }
-
-                let id = extract_id(&mut document)?;
-                self.projector.as_ref().unwrap().apply(&mut document);
-                let mut mergeboxes = mergeboxes.lock().await;
-                mergeboxes
-                    .insert(self.description.collection.clone(), id, document)
-                    .await?;
-
-                if let Some(limit) = self.description.options.limit {
-                    // TODO: Safe comparison.
-                    if self.documents.len() > limit.unsigned_abs() as usize {
-                        if let Some(mut document) = self.documents.pop() {
-                            let id = extract_id(&mut document)?;
-                            self.projector.as_ref().unwrap().apply(&mut document);
-                            mergeboxes
-                                .remove(self.description.collection.clone(), id, &document)
-                                .await?;
-                        }
-                    }
-                }
-
-                OK
-            }
-            Event::Update(document) => {
-                let mut document = into_ejson_document(document);
-                let is_matching = self.matcher.as_ref().unwrap().matches(&document);
-                if is_matching {
-                    if let Some(limit) = self.description.options.limit {
-                        let index = self
-                            .documents
-                            .binary_search_by(|x| self.sorter.as_ref().unwrap().cmp(x, &document))
-                            .unwrap_or_else(|index| index);
-                        // TODO: Safe comparison.
-                        if index == limit.unsigned_abs() as usize {
-                            return OK;
-                        }
-
-                        self.documents.insert(index, document.clone());
-                    } else {
-                        self.documents.push(document.clone());
-                    }
-
-                    let id = extract_id(&mut document)?;
-                    self.projector.as_ref().unwrap().apply(&mut document);
-                    let mut mergeboxes = mergeboxes.lock().await;
-                    mergeboxes
-                        .insert(self.description.collection.clone(), id.clone(), document)
-                        .await?;
-
-                    let maybe_index = self
-                        .documents
-                        .iter()
-                        .position(|x| x.get("_id") == Some(&id));
-                    if let Some(index) = maybe_index {
-                        let mut document = self.documents.swap_remove(index);
-                        document.remove("_id");
-                        mergeboxes
-                            .remove(self.description.collection.clone(), id, &document)
-                            .await?;
-                    }
-                } else {
-                    let id = extract_id(&mut document)?;
-                    let Some(index) = self
-                        .documents
-                        .iter()
-                        .position(|x| x.get("_id") == Some(&id))
-                    else {
-                        return OK;
-                    };
-
-                    // TODO: Safe comparison.
-                    if self
-                        .description
-                        .options
-                        .limit
-                        .is_some_and(|limit| limit.unsigned_abs() as usize == self.documents.len())
-                    {
-                        return self.fetch(mergeboxes).await;
-                    }
-
-                    let mut document = self.documents.swap_remove(index);
-                    let id = extract_id(&mut document)?;
-                    mergeboxes
-                        .lock()
-                        .await
-                        .remove(self.description.collection.clone(), id, &document)
-                        .await?;
-                }
-
-                OK
-            }
+        let refetch = process(
+            event,
+            &self.description,
+            &mut self.documents,
+            mergeboxes,
+            self.viewer.as_ref().unwrap(),
+        )
+        .await?;
+        if refetch {
+            self.fetch(mergeboxes).await?;
         }
+
+        OK
     }
 
     async fn watch(&mut self) -> Result<Option<Receiver<Event>>, Error> {
-        let CursorDescription {
-            collection,
-            selector,
-            options:
-                CursorOptions {
-                    disable_oplog,
-                    limit,
-                    projection,
-                    skip,
-                    sort,
-                    ..
-                },
-        } = &self.description;
-
-        // Publication can opt-out of real-time updates.
-        if *disable_oplog {
-            return Ok(None);
-        }
-
-        // We have to understand the selector to process the Change Stream
-        // events correctly.
-        match DocumentMatcher::compile(selector) {
-            Ok(matcher) => self.matcher = Some(matcher),
-            Err(error) => {
-                println!(
-                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mselector {selector:?} is not supported: {error}\x1b[0m"
-                );
-                return Ok(None);
-            }
-        }
-
-        match Projector::compile(projection.as_ref()) {
-            Ok(projector) => self.projector = Some(projector),
-            Err(error) => {
-                println!(
-                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31mprojection {projection:?} is not supported: {error}\x1b[0m",
-                );
-                return Ok(None);
-            }
-        }
-
-        match Sorter::compile(sort.as_ref()) {
-            Ok(sorter) => self.sorter = Some(sorter),
-            Err(error) => {
-                println!(
-                    "\x1b[0;32mmongo\x1b[0m \x1b[0;31msort {sort:?} is not supported: {error}\x1b[0m",
-                );
-                return Ok(None);
-            }
-        }
-
-        if limit.is_some() && sort.is_none() {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mlimit without sort is not supported\x1b[0m");
-            return Ok(None);
-        }
-
-        if skip.is_some() {
-            println!("\x1b[0;32mmongo\x1b[0m \x1b[0;31mskip is not supported\x1b[0m");
-            return Ok(None);
-        }
-
-        let receiver = self.watcher.lock().await.watch(collection.clone()).await;
+        let receiver = self
+            .watcher
+            .lock()
+            .await
+            .watch(self.description.collection.clone())
+            .await;
         Ok(Some(receiver))
     }
 }
@@ -469,6 +278,10 @@ impl CursorOptions {
     fn default_polling_interval_ms() -> u64 {
         10_000
     }
+
+    fn limit(&self) -> Option<usize> {
+        self.limit.map(|limit| limit.unsigned_abs() as usize)
+    }
 }
 
 impl From<CursorOptions> for FindOptions {
@@ -482,8 +295,312 @@ impl From<CursorOptions> for FindOptions {
     }
 }
 
+struct CursorViewer {
+    matcher: DocumentMatcher,
+    projector: Projector,
+    sorter: Sorter,
+}
+
+impl TryFrom<&CursorDescription> for CursorViewer {
+    type Error = Error;
+    fn try_from(description: &CursorDescription) -> Result<Self, Self::Error> {
+        let CursorDescription {
+            selector,
+            options:
+                CursorOptions {
+                    disable_oplog,
+                    limit,
+                    projection,
+                    skip,
+                    sort,
+                    ..
+                },
+            ..
+        } = description;
+
+        // Publication can opt-out of real-time updates.
+        if *disable_oplog {
+            return Err(anyhow!("explicitly disabled"));
+        }
+
+        // We have to understand the selector to process the Change Stream
+        // events correctly.
+        let matcher = DocumentMatcher::compile(selector)
+            .map_err(|error| anyhow!("selector {selector:?} is not supported: {error}"))?;
+
+        let projector = Projector::compile(projection.as_ref())
+            .map_err(|error| anyhow!("projection {projection:?} is not supported: {error}"))?;
+
+        let sorter = Sorter::compile(sort.as_ref())
+            .map_err(|error| anyhow!("sort {sort:?} is not supported: {error}"))?;
+
+        if limit.is_some() && sort.is_none() {
+            return Err(anyhow!("limit without sort is not supported"));
+        }
+
+        if skip.is_some() {
+            return Err(anyhow!("skip is not supported"));
+        }
+
+        Ok(Self {
+            matcher,
+            projector,
+            sorter,
+        })
+    }
+}
+
 fn extract_id(document: &mut Map<String, Value>) -> Result<Value, Error> {
     document
         .remove("_id")
         .ok_or_else(|| anyhow!("_id not found in {document:?}"))
+}
+
+async fn process(
+    event: Event,
+    description: &CursorDescription,
+    documents: &mut Vec<Map<String, Value>>,
+    mergeboxes: &Arc<Mutex<Mergeboxes>>,
+    viewer: &CursorViewer,
+) -> Result<bool, Error> {
+    match event {
+        Event::Clear => {
+            let mut mergeboxes = mergeboxes.lock().await;
+            for mut document in take(documents) {
+                let id = extract_id(&mut document)?;
+                viewer.projector.apply(&mut document);
+                mergeboxes
+                    .remove(description.collection.clone(), id, &document)
+                    .await?;
+            }
+            Ok(false)
+        }
+        Event::Delete(document) => {
+            let mut document = into_ejson_document(document);
+            let id = extract_id(&mut document)?;
+            let Some(index) = documents.iter().position(|x| x.get("_id") == Some(&id)) else {
+                return Ok(false);
+            };
+
+            if description
+                .options
+                .limit()
+                .is_some_and(|limit| limit == documents.len())
+            {
+                return Ok(true);
+            }
+
+            let mut document = documents.swap_remove(index);
+            document.remove("_id");
+            viewer.projector.apply(&mut document);
+            mergeboxes
+                .lock()
+                .await
+                .remove(description.collection.clone(), id, &document)
+                .await?;
+
+            Ok(false)
+        }
+        Event::Insert(document) => {
+            let mut document = into_ejson_document(document);
+            if !viewer.matcher.matches(&document) {
+                return Ok(false);
+            }
+
+            if let Some(limit) = description.options.limit {
+                let index = documents
+                    .binary_search_by(|x| viewer.sorter.cmp(x, &document))
+                    .unwrap_or_else(|index| index);
+                // TODO: Safe comparison.
+                if index == limit.unsigned_abs() as usize {
+                    return Ok(false);
+                }
+
+                documents.insert(index, document.clone());
+            } else {
+                documents.push(document.clone());
+            }
+
+            let id = extract_id(&mut document)?;
+            viewer.projector.apply(&mut document);
+            let mut mergeboxes = mergeboxes.lock().await;
+            mergeboxes
+                .insert(description.collection.clone(), id, document)
+                .await?;
+
+            if let Some(limit) = description.options.limit {
+                // TODO: Safe comparison.
+                if documents.len() > limit.unsigned_abs() as usize {
+                    if let Some(mut document) = documents.pop() {
+                        let id = extract_id(&mut document)?;
+                        viewer.projector.apply(&mut document);
+                        mergeboxes
+                            .remove(description.collection.clone(), id, &document)
+                            .await?;
+                    }
+                }
+            }
+
+            Ok(false)
+        }
+        Event::Update(document) => {
+            let mut document = into_ejson_document(document);
+            let is_matching = viewer.matcher.matches(&document);
+            if is_matching {
+                if let Some(limit) = description.options.limit {
+                    let index = documents
+                        .binary_search_by(|x| viewer.sorter.cmp(x, &document))
+                        .unwrap_or_else(|index| index);
+                    // TODO: Safe comparison.
+                    if index == limit.unsigned_abs() as usize {
+                        return Ok(false);
+                    }
+
+                    documents.insert(index, document.clone());
+                } else {
+                    documents.push(document.clone());
+                }
+
+                let id = extract_id(&mut document)?;
+                viewer.projector.apply(&mut document);
+                let mut mergeboxes = mergeboxes.lock().await;
+                mergeboxes
+                    .insert(description.collection.clone(), id.clone(), document)
+                    .await?;
+
+                let maybe_index = documents.iter().position(|x| x.get("_id") == Some(&id));
+                if let Some(index) = maybe_index {
+                    let mut document = documents.swap_remove(index);
+                    document.remove("_id");
+                    mergeboxes
+                        .remove(description.collection.clone(), id, &document)
+                        .await?;
+                }
+            } else {
+                let id = extract_id(&mut document)?;
+                let Some(index) = documents.iter().position(|x| x.get("_id") == Some(&id)) else {
+                    return Ok(false);
+                };
+
+                // TODO: Safe comparison.
+                if description
+                    .options
+                    .limit()
+                    .is_some_and(|limit| limit == documents.len())
+                {
+                    return Ok(true);
+                }
+
+                let mut document = documents.swap_remove(index);
+                let id = extract_id(&mut document)?;
+                mergeboxes
+                    .lock()
+                    .await
+                    .remove(description.collection.clone(), id, &document)
+                    .await?;
+            }
+
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{process, CursorDescription, CursorViewer};
+    use crate::ddp::DDPMessage;
+    use crate::mergebox::{Mergebox, Mergeboxes};
+    use crate::watcher::Event;
+    use anyhow::Error;
+    use bson::doc;
+    use serde::Deserialize;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use tokio::sync::mpsc::channel;
+    use tokio::sync::Mutex;
+    use tokio::test;
+
+    async fn simulate(
+        description: Value,
+        events: Vec<Event>,
+        messages: Vec<DDPMessage>,
+    ) -> Result<(), Error> {
+        let description = CursorDescription::deserialize(description)?;
+        let viewer = CursorViewer::try_from(&description)?;
+        let (sender, mut receiver) = channel(64);
+        let mergeboxes = Arc::new(Mutex::new({
+            let mut mergeboxes = Mergeboxes::default();
+            mergeboxes.insert_mergebox(1, &Arc::new(Mutex::new(Mergebox::new(sender))));
+            mergeboxes
+        }));
+
+        let mut documents = Vec::new();
+        for event in events {
+            process(event, &description, &mut documents, &mergeboxes, &viewer).await?;
+        }
+
+        for message in messages {
+            assert_eq!(receiver.try_recv(), Ok(message));
+        }
+
+        assert!(receiver.try_recv().is_err());
+        assert!(documents.is_empty());
+
+        Ok(())
+    }
+
+    macro_rules! simulate {
+        ($name:ident, $description:expr, $events:expr, $messages:expr) => {
+            #[test]
+            async fn $name() -> Result<(), Error> {
+                simulate($description, $events, $messages).await
+            }
+        };
+    }
+
+    macro_rules! json_doc {
+        ($($json:tt)*) => {
+            match json! {{ $($json)* }} {
+                Value::Object(map) => map,
+                _ => unreachable!(),
+            }
+        };
+    }
+
+    simulate!(
+        scenario_1,
+        json! {{"collectionName": "x", "selector": {}, "options": {}}},
+        vec![],
+        vec![]
+    );
+
+    simulate!(
+        scenario_2,
+        json! {{"collectionName": "x", "selector": {}, "options": {}}},
+        vec![
+            Event::Insert(doc! {"_id": 1}),
+            Event::Insert(doc! {"_id": 2, "a": 3}),
+            Event::Clear
+        ],
+        vec![
+            DDPMessage::Added {
+                collection: "x".to_owned(),
+                id: json!(1),
+                fields: None
+            },
+            DDPMessage::Added {
+                collection: "x".to_owned(),
+                id: json!(2),
+                fields: Some(json_doc! {"a": 3})
+            },
+            DDPMessage::Removed {
+                collection: "x".to_owned(),
+                id: json!(1)
+            },
+            DDPMessage::Removed {
+                collection: "x".to_owned(),
+                id: json!(2)
+            }
+        ]
+    );
 }

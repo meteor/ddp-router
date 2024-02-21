@@ -4,7 +4,7 @@ use serde_json::{from_str, to_string, Map, Value};
 use tokio_tungstenite::tungstenite::Message;
 
 /// <https://github.com/meteor/meteor/blob/devel/packages/ddp/DDP.md>
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, tag = "msg")]
 pub enum DDPMessage {
     // Establishing connection.
