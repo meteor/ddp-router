@@ -28,13 +28,11 @@ async fn process_message_client(session: &Session, ddp_message: DDPMessage) -> R
         DDPMessage::Sub { id, name, params } => {
             // If we already checked this subscription and failed, pass it to
             // the server immediately.
-            let is_server_subscription = {
-                session
-                    .subscriptions
-                    .lock()
-                    .await
-                    .is_server_subscription(&name)
-            };
+            let is_server_subscription = session
+                .subscriptions
+                .lock()
+                .await
+                .is_server_subscription(&name);
 
             if is_server_subscription {
                 session
@@ -102,14 +100,12 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                 return Ok(());
             };
 
-            let subscription_started = {
-                session
-                    .subscriptions
-                    .lock()
-                    .await
-                    .start(session.id, &session.mergebox, &inflight, id, error, result)
-                    .await
-            };
+            let subscription_started = session
+                .subscriptions
+                .lock()
+                .await
+                .start(session.id, &session.mergebox, &inflight, id, error, result)
+                .await;
 
             match subscription_started {
                 Ok(()) => {
