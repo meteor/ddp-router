@@ -30,8 +30,9 @@ impl Mergeboxes {
     }
 
     pub fn insert_mergebox(&mut self, session_id: usize, mergebox: &Arc<Mutex<Mergebox>>) -> bool {
-        self.0.insert(session_id, mergebox.clone());
-        self.0.len() == 1
+        let is_empty = self.0.is_empty();
+        self.0.entry(session_id).or_insert_with(|| mergebox.clone());
+        is_empty
     }
 
     pub async fn remove(

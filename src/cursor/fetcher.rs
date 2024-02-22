@@ -236,10 +236,17 @@ async fn process(
             let mut document = into_ejson_document(document);
             let is_matching = viewer.matcher.matches(&document);
             if is_matching {
+                let index_before = {
+                    let id = document.get("_id");
+                    documents.iter().position(|x| x.get("_id") == id)
+                };
+
                 if let Some(limit) = description.limit() {
                     let index = documents
                         .binary_search_by(|x| viewer.sorter.cmp(x, &document))
                         .unwrap_or_else(|index| index);
+
+                    // Skip newly matching documents that don't fit in `limit`.
                     if index == limit {
                         return Ok(false);
                     }
@@ -256,9 +263,13 @@ async fn process(
                     .insert(description.collection.clone(), id.clone(), document)
                     .await?;
 
-                let maybe_index = documents.iter().position(|x| x.get("_id") == Some(&id));
-                if let Some(index) = maybe_index {
-                    let mut document = documents.swap_remove(index);
+                if let Some(index) = index_before {
+                    let mut document = if description.limit().is_some() {
+                        documents.remove(index)
+                    } else {
+                        documents.swap_remove(index)
+                    };
+
                     document.remove("_id");
                     mergeboxes
                         .remove(description.collection.clone(), id, &document)
@@ -270,15 +281,18 @@ async fn process(
                     return Ok(false);
                 };
 
-                // TODO: Safe comparison.
-                if description
-                    .limit()
-                    .is_some_and(|limit| limit == documents.len())
-                {
-                    return Ok(true);
-                }
+                let mut document = match description.limit() {
+                    Some(limit) => {
+                        // If we fall below the limit, we need to refetch.
+                        if limit == documents.len() {
+                            return Ok(true);
+                        };
 
-                let mut document = documents.swap_remove(index);
+                        documents.remove(index)
+                    }
+                    None => documents.swap_remove(index),
+                };
+
                 let id = extract_id(&mut document)?;
                 mergeboxes
                     .lock()

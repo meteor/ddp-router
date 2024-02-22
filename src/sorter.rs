@@ -4,6 +4,7 @@ use bson::{Bson, Document};
 use serde_json::{Map, Value};
 use std::cmp::Ordering;
 
+#[derive(Debug)]
 pub struct Sorter {
     lookups: Vec<(Lookup, bool)>,
 }

@@ -4,6 +4,7 @@ use crate::projector::Projector;
 use crate::sorter::Sorter;
 use anyhow::{ensure, Context, Error};
 
+#[derive(Debug)]
 pub struct CursorViewer {
     pub matcher: DocumentMatcher,
     pub projector: Projector,

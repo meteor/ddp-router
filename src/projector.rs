@@ -3,6 +3,7 @@ use bson::{Bson, Document};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub struct Projector(Tree, bool);
 
 impl Projector {
@@ -57,7 +58,7 @@ impl Projector {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 enum Tree {
     #[default]
     Leaf,
