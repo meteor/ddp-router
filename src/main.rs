@@ -14,6 +14,7 @@ mod subscriptions;
 mod watcher;
 
 use anyhow::Error;
+use futures_util::FutureExt;
 use mongodb::Client;
 use session::start_session;
 use settings::Settings;
@@ -48,12 +49,19 @@ async fn main() -> Result<(), Error> {
         let stream = listener.accept().await?.0;
         let meteor_url = settings.meteor.url.clone();
         let subscriptions = subscriptions.clone();
-        spawn(async move {
-            let client = accept_async(stream).await?;
-            let server = connect_async(meteor_url).await?.0;
-            let result = start_session(session_id, subscriptions.clone(), client, server).await;
-            println!("\n\n\n\n\n{result:?}\n\n\n\n\n");
-            result
-        });
+        spawn(
+            async move {
+                let client = accept_async(stream).await?;
+                let server = connect_async(meteor_url).await?.0;
+                start_session(session_id, subscriptions.clone(), client, server).await
+            }
+            .then(|result| async move {
+                // TODO: Better handling of subtasks.
+                if let Err(error) = &result {
+                    println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
+                }
+                result
+            }),
+        );
     }
 }
