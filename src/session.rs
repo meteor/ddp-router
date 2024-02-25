@@ -119,10 +119,9 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                         .await?;
                 }
                 Err(error) => {
-                    // If the method failed, did not provide a response,
-                    // used an incorrect format, or requires an unsupported
-                    // query option, remember that and start a classic server
-                    // subscription instead.
+                    // If the method failed, did not provide a response, used an
+                    // incorrect format, or requires an unsupported query
+                    // option, start a classic server subscription instead.
                     println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
                     session
                         .server_writer
@@ -132,11 +131,6 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                             params: inflight.params,
                         })
                         .await?;
-                    session
-                        .subscriptions
-                        .lock()
-                        .await
-                        .add_server_subscription(inflight.name);
                 }
             }
 

@@ -21,10 +21,6 @@ pub struct Subscriptions {
 }
 
 impl Subscriptions {
-    pub fn add_server_subscription(&mut self, subscription: String) {
-        self.server_subscriptions.insert(subscription);
-    }
-
     pub fn is_server_subscription(&self, subscription: &str) -> bool {
         self.server_subscriptions.contains(subscription)
     }
@@ -57,6 +53,7 @@ impl Subscriptions {
                         .and_then(|x| x.strip_suffix("' not found"))
                         .is_some_and(|x| x == inflight.name) =>
                 {
+                    self.server_subscriptions.insert(inflight.name.clone());
                     anyhow!("Publication for {} was not registered", inflight.name)
                 }
                 _ => anyhow!(error.clone()),
