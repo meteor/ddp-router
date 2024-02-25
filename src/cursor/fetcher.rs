@@ -25,7 +25,7 @@ pub struct CursorFetcher {
 
 impl CursorFetcher {
     pub async fn fetch(&mut self, mergeboxes: &Arc<Mutex<Mergeboxes>>) -> Result<(), Error> {
-        println!("\x1b[0;32mmongo\x1b[0m  fetch({:?})", self.description);
+        println!("\x1b[0;32mmongo\x1b[0m fetch({:?})", self.description);
 
         let mut documents: Vec<_> = self
             .database
@@ -117,7 +117,7 @@ impl CursorFetcher {
         Ok(())
     }
 
-    pub async fn watch(&mut self) -> Result<Receiver<Event>, Interval> {
+    pub async fn watch(&self) -> Result<Receiver<Event>, Interval> {
         if self.viewer.is_some() {
             let mut watcher = self.watcher.lock().await;
             Ok(watcher.watch(self.description.collection.clone()).await)
