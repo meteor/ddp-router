@@ -2,7 +2,7 @@ use crate::ddp::DDPMessage;
 use crate::inflights::{Inflight, Inflights};
 use crate::mergebox::Mergebox;
 use crate::subscriptions::Subscriptions;
-use anyhow::Error;
+use anyhow::{Context, Error};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt, TryStreamExt};
 use std::sync::Arc;
@@ -122,7 +122,7 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
                     // If the method failed, did not provide a response, used an
                     // incorrect format, or requires an unsupported query
                     // option, start a classic server subscription instead.
-                    println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
+                    println!("\x1b[0;31m[[ERROR]] {error:?}\x1b[0m");
                     session
                         .server_writer
                         .send(DDPMessage::Sub {
@@ -225,7 +225,8 @@ async fn start_producer_client(
     session: Arc<Session>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
-        let ddp_message = DDPMessage::try_from(raw_message)?;
+        let ddp_message = DDPMessage::try_from(&raw_message)
+            .with_context(|| format!("Invalid DDP message from client: {raw_message:?}"))?;
         println!("\x1b[0;34mclient\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
         process_message_client(&session, ddp_message).await?;
     }
@@ -238,7 +239,8 @@ async fn start_producer_server(
     session: Arc<Session>,
 ) -> Result<(), Error> {
     while let Some(raw_message) = stream.try_next().await? {
-        let ddp_message = DDPMessage::try_from(raw_message)?;
+        let ddp_message = DDPMessage::try_from(&raw_message)
+            .with_context(|| format!("Invalid DDP message from server: {raw_message:?}"))?;
         println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
         process_message_server(&session, ddp_message).await?;
     }

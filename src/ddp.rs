@@ -116,9 +116,9 @@ impl TryFrom<DDPMessage> for Message {
     }
 }
 
-impl TryFrom<Message> for DDPMessage {
+impl TryFrom<&Message> for DDPMessage {
     type Error = Error;
-    fn try_from(raw_message: Message) -> Result<Self, Self::Error> {
+    fn try_from(raw_message: &Message) -> Result<Self, Self::Error> {
         Ok(from_str(raw_message.to_text()?)?)
     }
 }

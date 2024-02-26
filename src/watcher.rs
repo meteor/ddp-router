@@ -93,7 +93,7 @@ impl Watcher {
         spawn(task.then(|result| async move {
             // TODO: Better handling of subtasks.
             if let Err(error) = &result {
-                println!("\x1b[0;31m[[ERROR]] {error}\x1b[0m");
+                println!("\x1b[0;31m[[ERROR]] {error:?}\x1b[0m");
             }
             result
         }));
