@@ -138,8 +138,7 @@ impl Subscriptions {
         if let Some((subscription_id, cursors)) = self
             .cursors_by_session
             .get_mut(&session_id)
-            .ok_or_else(|| anyhow!("Session not found {session_id}"))?
-            .remove_entry(subscription_id)
+            .and_then(|cursors| cursors.remove_entry(subscription_id))
         {
             for cursor in cursors {
                 cursor.lock().await.stop(session_id, mergebox).await?;
@@ -155,15 +154,10 @@ impl Subscriptions {
         session_id: usize,
         mergebox: &Arc<Mutex<Mergebox>>,
     ) -> Result<(), Error> {
-        let cursors = self
-            .cursors_by_session
-            .remove(&session_id)
-            .ok_or_else(|| anyhow!("Session not found {session_id}"))?
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>();
-        for cursor in cursors {
-            cursor.lock().await.stop(session_id, mergebox).await?;
+        if let Some(cursors) = self.cursors_by_session.remove(&session_id) {
+            for cursor in cursors.into_values().flatten() {
+                cursor.lock().await.stop(session_id, mergebox).await?;
+            }
         }
 
         Ok(())
