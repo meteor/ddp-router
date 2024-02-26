@@ -156,6 +156,7 @@ async fn process_message_server(session: &Session, ddp_message: DDPMessage) -> R
             id,
             collection,
             fields,
+            ..
         } => {
             session
                 .mergebox

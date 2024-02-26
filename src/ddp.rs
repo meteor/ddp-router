@@ -39,6 +39,10 @@ pub enum DDPMessage {
         id: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         fields: Option<Map<String, Value>>,
+        /// FIXME: Apparently Meteor can send `cleared` in `added`... We have to
+        /// figure out what does it mean.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cleared: Option<Vec<String>>,
     },
     #[serde(rename = "addedBefore")]
     AddedBefore {

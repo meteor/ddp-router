@@ -95,6 +95,7 @@ impl Mergebox {
                     } else {
                         Some(document)
                     },
+                    cleared: None,
                 })
                 .await?;
         }

@@ -387,12 +387,14 @@ mod tests {
             DDPMessage::Added {
                 collection: "x".to_owned(),
                 id: json!(1),
-                fields: None
+                fields: None,
+                cleared: None,
             },
             DDPMessage::Added {
                 collection: "x".to_owned(),
                 id: json!(2),
-                fields: Some(json_doc! {"a": 3})
+                fields: Some(json_doc! {"a": 3}),
+                cleared: None,
             },
             DDPMessage::Removed {
                 collection: "x".to_owned(),
