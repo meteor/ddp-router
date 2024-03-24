@@ -1,0 +1,18 @@
+accepted = ["Apache-2.0", "BSD-3-Clause", "ISC", "MIT", "MPL-2.0"]
+private = { ignore = true }
+
+[ring]
+accepted = ["OpenSSL"]
+
+[ring.clarify]
+license = "ISC AND MIT AND OpenSSL"
+
+[[ring.clarify.files]]
+path = "LICENSE"
+license = "OpenSSL"
+checksum = "53552a9b197cd0db29bd085d81253e67097eedd713706e8cd2a3cc6c29850ceb"
+start = "/* ===================================================================="
+end = "\n * Hudson (tjh@cryptsoft.com).\n *\n */"
+
+[unicode-ident]
+accepted = ["Unicode-DFS-2016"]

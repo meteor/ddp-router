@@ -78,3 +78,10 @@ When the client connects to the DDP Router, the DDP Router connects to the Meteo
     const idParse = MongoID.idParse;
     MongoID.idParse = id => (id?.$type === 'oid' ? idParse(id.$value) : idParse(id));
     ```
+
+## Licenses
+
+We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) and [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny) to handle 3rd party licenses.
+
+* `cargo about generate -o licenses.html about.hbs` generates a HTML summary of 3rd party licenses.
+* `cargo deny check licenses` checks all 3rd party licenses (i.e., whether they are on the allowed list).
