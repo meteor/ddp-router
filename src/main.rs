@@ -13,7 +13,7 @@ mod sorter;
 mod subscriptions;
 mod watcher;
 
-use anyhow::Error;
+use anyhow::{Context, Error};
 use futures_util::FutureExt;
 use mongodb::Client;
 use session::start_session;
@@ -28,15 +28,23 @@ use watcher::Watcher;
 
 #[main]
 async fn main() -> Result<(), Error> {
-    let settings = Settings::from("./config")?;
-    println!("\x1b[0;33mrouter\x1b[0m Started at {}", settings.router.url);
+    let settings = Settings::from("./config").context("Failed to load config")?;
+    println!("\x1b[0;33mrouter\x1b[0m Config loaded");
 
-    let mut session_id_counter = 0;
-    let listener = TcpListener::bind(settings.router.url).await?;
+    let listener = TcpListener::bind(&settings.router.url).await?;
+    println!(
+        "\x1b[0;33mrouter\x1b[0m Listening at {}",
+        settings.router.url
+    );
+
     let database = Client::with_uri_str(settings.mongo.url)
-        .await?
+        .await
+        .context("Failed to connect to MongoDB")?
         .default_database()
         .expect("Mongo URL did not specify the database");
+    println!("\x1b[0;33mrouter\x1b[0m Connected to MongoDB");
+
+    let mut session_id_counter = 0;
     let watcher = Watcher::new(database.clone());
     let subscriptions = Arc::new(Mutex::new(Subscriptions::new(database, watcher)));
 
@@ -51,8 +59,13 @@ async fn main() -> Result<(), Error> {
         let subscriptions = subscriptions.clone();
         spawn(
             async move {
-                let client = accept_async(stream).await?;
-                let server = connect_async(meteor_url).await?.0;
+                let client = accept_async(stream)
+                    .await
+                    .context("Failed to accept incoming WebSocket connection")?;
+                let server = connect_async(meteor_url)
+                    .await
+                    .context("Failed to connect to Meteor server")?
+                    .0;
                 start_session(session_id, subscriptions.clone(), client, server).await
             }
             .then(|result| async move {
