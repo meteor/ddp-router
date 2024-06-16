@@ -26,8 +26,8 @@ pub struct Settings {
 impl Settings {
     pub fn from(path: &str) -> Result<Self, ConfigError> {
         Config::builder()
-            .add_source(File::with_name(path))
-            .add_source(Environment::default().separator("_"))
+            .add_source(File::with_name(path).required(false))
+            .add_source(Environment::default().ignore_empty(true).separator("_"))
             .build()?
             .try_deserialize()
     }
