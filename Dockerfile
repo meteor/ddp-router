@@ -10,7 +10,7 @@ RUN cargo build --release
 
 FROM debian:bookworm
 RUN apt-get update && \
-    apt-get install -y --no-cache openssl ca-certificates && \
+    apt-get install --yes openssl ca-certificates && \
     update-ca-certificates
 COPY --from=builder /usr/src/ddp-router/target/release/ddp-router /ddp-router
 CMD ["/ddp-router"]
