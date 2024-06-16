@@ -41,6 +41,7 @@ pub enum DDPMessage {
         fields: Option<Map<String, Value>>,
         /// FIXME: Apparently Meteor can send `cleared` in `added`... We have to
         /// figure out what does it mean.
+        // https://github.com/meteor/meteor/blob/7c75017527b676669748088a4fc867e3d43e89c4/packages/ddp-common/utils.js#L97
         #[serde(skip_serializing_if = "Option::is_none")]
         cleared: Option<Vec<String>>,
     },
