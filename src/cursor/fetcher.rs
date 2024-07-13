@@ -294,6 +294,7 @@ async fn process(
                 };
 
                 let id = extract_id(&mut document)?;
+                viewer.projector.apply(&mut document);
                 mergeboxes
                     .lock()
                     .await
