@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-anyhow = "1.0.79"
+anyhow = { version = "1.0.79", features = ["backtrace"] }
 base64 = "0.21.7"
 bson = "2.9.0"
 config = { version = "0.14.0", default-features = false, features = ["toml"] }

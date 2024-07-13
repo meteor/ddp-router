@@ -16,10 +16,10 @@
           const cursors =
             Array.isArray(maybeCursorOrCursors)
               ? maybeCursorOrCursors
-              : maybeCursorOrCursors
-              ? [maybeCursorOrCursors]
-              : [];
-          const cursorDescriptions = cursors.map(cursor => cursor._cursorDescription);
+              : [maybeCursorOrCursors];
+          const cursorDescriptions = cursors
+            .filter(Boolean)
+            .map(cursor => cursor._cursorDescription);
           // Use BSON's EJSON instead of Meteor's one and return a string to make
           // sure the latter won't interfere.
           return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
