@@ -225,7 +225,16 @@ async fn start_producer_client(
     mut stream: SplitStream<WebSocketStream<TcpStream>>,
     session: Arc<Session>,
 ) -> Result<(), Error> {
-    while let Some(raw_message) = stream.try_next().await? {
+    while let Some(raw_message) = stream
+        .try_next()
+        .await
+        .context("Failed to recive client message")?
+    {
+        if raw_message.is_close() {
+            println!("\x1b[0;34mclient\x1b[0m -> \x1b[0;33mrouter\x1b[0m Disconnected");
+            break;
+        }
+
         let ddp_message = DDPMessage::try_from(&raw_message)
             .with_context(|| format!("Invalid DDP message from client: {raw_message:?}"))?;
         println!("\x1b[0;34mclient\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
@@ -239,7 +248,16 @@ async fn start_producer_server(
     mut stream: SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     session: Arc<Session>,
 ) -> Result<(), Error> {
-    while let Some(raw_message) = stream.try_next().await? {
+    while let Some(raw_message) = stream
+        .try_next()
+        .await
+        .context("Failed to recive server message")?
+    {
+        if raw_message.is_close() {
+            println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m Disconnected");
+            break;
+        }
+
         let ddp_message = DDPMessage::try_from(&raw_message)
             .with_context(|| format!("Invalid DDP message from server: {raw_message:?}"))?;
         println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
