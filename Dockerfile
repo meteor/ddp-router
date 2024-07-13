@@ -1,4 +1,4 @@
-FROM rust:1.75.0-bookworm as builder
+FROM rust:1.79.0-bookworm as builder
 WORKDIR /usr/src
 RUN cargo new --bin ddp-router
 COPY Cargo.toml Cargo.lock /usr/src/ddp-router/
