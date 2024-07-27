@@ -3,8 +3,7 @@ use super::viewer::CursorViewer;
 use crate::ejson::into_ejson_document;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::watcher::{Event, Watcher};
-use anyhow::anyhow;
-use anyhow::Error;
+use anyhow::{anyhow, Context, Error};
 use bson::Document;
 use futures_util::{StreamExt, TryStreamExt};
 use mongodb::Database;
@@ -98,8 +97,9 @@ impl CursorFetcher {
             self.viewer.as_ref().unwrap(),
         )
         .await?;
+
         if refetch {
-            self.fetch(mergeboxes).await?;
+            self.fetch(mergeboxes).await.context("Refetching failed")?;
         }
 
         Ok(())
@@ -163,7 +163,8 @@ async fn process(
                 viewer.projector.apply(&mut document);
                 mergeboxes
                     .remove(description.collection.clone(), id, &document)
-                    .await?;
+                    .await
+                    .context("Remove while processing clear event")?;
             }
             Ok(false)
         }
@@ -188,7 +189,8 @@ async fn process(
                 .lock()
                 .await
                 .remove(description.collection.clone(), id, &document)
-                .await?;
+                .await
+                .context("Remove while processing delete event")?;
 
             Ok(false)
         }
@@ -216,7 +218,8 @@ async fn process(
             let mut mergeboxes = mergeboxes.lock().await;
             mergeboxes
                 .insert(description.collection.clone(), id, document)
-                .await?;
+                .await
+                .context("Insert while processing insert event")?;
 
             if let Some(limit) = description.limit() {
                 if documents.len() > limit {
@@ -225,7 +228,8 @@ async fn process(
                         viewer.projector.apply(&mut document);
                         mergeboxes
                             .remove(description.collection.clone(), id, &document)
-                            .await?;
+                            .await
+                            .context("Remove while processing insert event")?;
                     }
                 }
             }
@@ -261,7 +265,8 @@ async fn process(
                 let mut mergeboxes = mergeboxes.lock().await;
                 mergeboxes
                     .insert(description.collection.clone(), id.clone(), document)
-                    .await?;
+                    .await
+                    .context("Insert while processing update event")?;
 
                 if let Some(index) = index_before {
                     let mut document = if description.limit().is_some() {
@@ -271,9 +276,11 @@ async fn process(
                     };
 
                     document.remove("_id");
+                    viewer.projector.apply(&mut document);
                     mergeboxes
                         .remove(description.collection.clone(), id, &document)
-                        .await?;
+                        .await
+                        .context("Remove while processing update event")?;
                 }
             } else {
                 let id = extract_id(&mut document)?;
@@ -299,7 +306,8 @@ async fn process(
                     .lock()
                     .await
                     .remove(description.collection.clone(), id, &document)
-                    .await?;
+                    .await
+                    .context("Remove while processing update event")?;
             }
 
             Ok(false)

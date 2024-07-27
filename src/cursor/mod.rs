@@ -2,11 +2,12 @@ mod description;
 mod fetcher;
 mod viewer;
 
+pub use description::CursorDescription;
+
 use crate::drop_handle::DropHandle;
 use crate::mergebox::{Mergebox, Mergeboxes};
 use crate::watcher::Watcher;
-use anyhow::Error;
-pub use description::CursorDescription;
+use anyhow::{Context, Error};
 use fetcher::CursorFetcher;
 use futures_util::FutureExt;
 use mongodb::Database;
@@ -58,7 +59,12 @@ impl Cursor {
 
             // Run initial query.
             let mergeboxes = self.mergeboxes.clone();
-            self.fetcher.write().await.fetch(&mergeboxes).await?;
+            self.fetcher
+                .write()
+                .await
+                .fetch(&mergeboxes)
+                .await
+                .context("Initial fetch")?;
 
             // Start background task.
             let fetcher = self.fetcher.clone();
@@ -68,11 +74,21 @@ impl Cursor {
                 match receiver_or_interval {
                     Ok(mut receiver) => loop {
                         let event = receiver.recv().await?;
-                        fetcher.write().await.process(event, &mergeboxes).await?;
+                        fetcher
+                            .write()
+                            .await
+                            .process(event, &mergeboxes)
+                            .await
+                            .context("Processing event")?;
                     },
                     Err(mut interval) => loop {
                         interval.tick().await;
-                        fetcher.write().await.fetch(&mergeboxes).await?;
+                        fetcher
+                            .write()
+                            .await
+                            .fetch(&mergeboxes)
+                            .await
+                            .context("Interval fetch")?;
                     },
                 }
             }

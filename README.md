@@ -13,15 +13,25 @@
         [`__subscription__${name}`]() {
           const context = { ...this, ready() {}, unblock() {} };
           const maybeCursorOrCursors = fn.apply(context, arguments);
-          const cursors =
-            Array.isArray(maybeCursorOrCursors)
-              ? maybeCursorOrCursors
-              : [maybeCursorOrCursors];
-          const cursorDescriptions = cursors
-            .filter(Boolean)
-            .map(cursor => cursor._cursorDescription);
-          // Use BSON's EJSON instead of Meteor's one and return a string to make
-          // sure the latter won't interfere.
+        const cursors =
+          Array.isArray(maybeCursorOrCursors)
+            ? maybeCursorOrCursors
+            : maybeCursorOrCursors
+            ? [maybeCursorOrCursors]
+            : [];
+
+        const cursorDescriptions = cursors.map(cursor => {
+          const cursorDescription = cursor._cursorDescription;
+          if (!cursorDescription) {
+            console.error('Expected a cursor, got:', cursor);
+            throw new Error('CursorExpectedError');
+          }
+
+          return cursorDescription;
+        });
+
+        // Use BSON's EJSON instead of Meteor's one and return a string to make
+        // sure the latter won't interfere.
           return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
         },
       });

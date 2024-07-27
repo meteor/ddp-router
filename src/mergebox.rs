@@ -1,5 +1,5 @@
 use crate::ddp::DDPMessage;
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, Context, Error};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,7 +23,10 @@ impl Mergeboxes {
                 .lock()
                 .await
                 .insert(collection.clone(), id.clone(), document.clone())
-                .await?;
+                .await
+                .with_context(|| {
+                    format!("Mergebox insert for {id} from {collection}: {document:?}")
+                })?;
         }
 
         Ok(())
@@ -46,7 +49,10 @@ impl Mergeboxes {
                 .lock()
                 .await
                 .remove(collection.clone(), id.clone(), document)
-                .await?;
+                .await
+                .with_context(|| {
+                    format!("Mergebox remove for {id} from {collection}: {document:?}")
+                })?;
         }
 
         Ok(())
