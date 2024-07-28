@@ -135,7 +135,8 @@ impl CursorFetcher {
             let id = extract_id(&mut document)?;
             mergebox
                 .remove(self.description.collection.clone(), id, &document)
-                .await?;
+                .await
+                .context("Remove while unregister")?;
         }
 
         Ok(())

@@ -24,9 +24,7 @@ impl Mergeboxes {
                 .await
                 .insert(collection.clone(), id.clone(), document.clone())
                 .await
-                .with_context(|| {
-                    format!("Mergebox insert for {id} from {collection}: {document:?}")
-                })?;
+                .context("Insert within Mergeboxes")?;
         }
 
         Ok(())
@@ -50,9 +48,7 @@ impl Mergeboxes {
                 .await
                 .remove(collection.clone(), id.clone(), document)
                 .await
-                .with_context(|| {
-                    format!("Mergebox remove for {id} from {collection}: {document:?}")
-                })?;
+                .context("Remove within Mergeboxes")?;
         }
 
         Ok(())
@@ -131,7 +127,10 @@ impl Mergebox {
             .iter()
             .position(|x| x.id == id)
             .ok_or_else(|| anyhow!("Document {id} not found in {collection}"))?;
-        let cleared = mergebox_collection[mergebox_index].remove(document)?;
+        let cleared = mergebox_collection[mergebox_index]
+            .remove(document)
+            .with_context(|| format!("Remove {id} from {collection}"))?;
+
         if mergebox_collection[mergebox_index].count == 0 {
             mergebox_collection.swap_remove(mergebox_index);
             self.messages_sink
@@ -196,8 +195,11 @@ impl Mergebox {
 
         // Update `collections`.
         self.insert(collection.clone(), id.clone(), document_applied)
-            .await?;
-        self.remove(collection, id, &document).await
+            .await
+            .context("Insert while server_changed")?;
+        self.remove(collection, id, &document)
+            .await
+            .context("Remove while server_changed")
     }
 
     pub async fn server_removed(&mut self, collection: String, id: Value) -> Result<(), Error> {
@@ -213,7 +215,9 @@ impl Mergebox {
         let document = documents.swap_remove(index).1;
 
         // Update `collections`.
-        self.remove(collection, id, &document).await
+        self.remove(collection, id, &document)
+            .await
+            .context("Remove while server_removed")
     }
 }
 
