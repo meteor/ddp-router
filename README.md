@@ -10,28 +10,28 @@
     const { publish } = Meteor;
     Meteor.publish = function publishWithDDPRouter(name, fn) {
       Meteor.methods({
-        [`__subscription__${name}`]() {
+        async [`__subscription__${name}`]() {
           const context = { ...this, ready() {}, unblock() {} };
-          const maybeCursorOrCursors = fn.apply(context, arguments);
-        const cursors =
-          Array.isArray(maybeCursorOrCursors)
-            ? maybeCursorOrCursors
-            : maybeCursorOrCursors
-            ? [maybeCursorOrCursors]
-            : [];
+          const maybeCursorOrCursors = await fn.apply(context, arguments);
+          const cursors =
+            Array.isArray(maybeCursorOrCursors)
+              ? maybeCursorOrCursors
+              : maybeCursorOrCursors
+              ? [maybeCursorOrCursors]
+              : [];
 
-        const cursorDescriptions = cursors.map(cursor => {
-          const cursorDescription = cursor._cursorDescription;
-          if (!cursorDescription) {
-            console.error('Expected a cursor, got:', cursor);
-            throw new Error('CursorExpectedError');
-          }
+          const cursorDescriptions = cursors.map(cursor => {
+            const cursorDescription = cursor._cursorDescription;
+            if (!cursorDescription) {
+              console.error('Expected a cursor, got:', cursor);
+              throw new Error('CursorExpectedError');
+            }
 
-          return cursorDescription;
-        });
+            return cursorDescription;
+          });
 
-        // Use BSON's EJSON instead of Meteor's one and return a string to make
-        // sure the latter won't interfere.
+          // Use BSON's EJSON instead of Meteor's one and return a string to make
+          // sure the latter won't interfere.
           return NpmModuleMongodb.BSON.EJSON.stringify(cursorDescriptions);
         },
       });
