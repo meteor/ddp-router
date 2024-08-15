@@ -2,7 +2,7 @@ use crate::cursor::{Cursor, CursorDescription};
 use crate::inflights::Inflight;
 use crate::mergebox::Mergebox;
 use crate::watcher::Watcher;
-use anyhow::{anyhow, Error};
+use anyhow::{anyhow, Context, Error};
 use mongodb::Database;
 use serde::Deserialize;
 use serde_json::{from_str, Value};
@@ -141,7 +141,12 @@ impl Subscriptions {
             .and_then(|cursors| cursors.remove_entry(subscription_id))
         {
             for cursor in cursors {
-                cursor.lock().await.stop(session_id, mergebox).await?;
+                cursor
+                    .lock()
+                    .await
+                    .stop(session_id, mergebox)
+                    .await
+                    .context("Subscriptions::stop")?;
             }
             Ok(Some(subscription_id))
         } else {
@@ -156,7 +161,12 @@ impl Subscriptions {
     ) -> Result<(), Error> {
         if let Some(cursors) = self.cursors_by_session.remove(&session_id) {
             for cursor in cursors.into_values().flatten() {
-                cursor.lock().await.stop(session_id, mergebox).await?;
+                cursor
+                    .lock()
+                    .await
+                    .stop(session_id, mergebox)
+                    .await
+                    .context("Subscriptions::stop_all")?;
             }
         }
 

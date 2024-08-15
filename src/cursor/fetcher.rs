@@ -96,10 +96,13 @@ impl CursorFetcher {
             mergeboxes,
             self.viewer.as_ref().unwrap(),
         )
-        .await?;
+        .await
+        .context("CursorFetcher::process")?;
 
         if refetch {
-            self.fetch(mergeboxes).await.context("Refetching failed")?;
+            self.fetch(mergeboxes)
+                .await
+                .context("CursorFetcher::process (refetch)")?;
         }
 
         Ok(())
@@ -111,7 +114,8 @@ impl CursorFetcher {
             let id = extract_id(&mut document)?;
             mergebox
                 .insert(self.description.collection.clone(), id, document)
-                .await?;
+                .await
+                .context("CursorFetcher::register")?;
         }
 
         Ok(())
@@ -136,7 +140,7 @@ impl CursorFetcher {
             mergebox
                 .remove(self.description.collection.clone(), id, &document)
                 .await
-                .context("Remove while unregister")?;
+                .context("CursorFetcher::unregister")?;
         }
 
         Ok(())
@@ -165,7 +169,7 @@ async fn process(
                 mergeboxes
                     .remove(description.collection.clone(), id, &document)
                     .await
-                    .context("Remove while processing clear event")?;
+                    .context("process -> Event::Clear")?;
             }
             Ok(false)
         }
@@ -191,7 +195,7 @@ async fn process(
                 .await
                 .remove(description.collection.clone(), id, &document)
                 .await
-                .context("Remove while processing delete event")?;
+                .context("process -> Event::Delete")?;
 
             Ok(false)
         }
@@ -220,7 +224,7 @@ async fn process(
             mergeboxes
                 .insert(description.collection.clone(), id, document)
                 .await
-                .context("Insert while processing insert event")?;
+                .context("process -> Event::Insert")?;
 
             if let Some(limit) = description.limit() {
                 if documents.len() > limit {
@@ -230,7 +234,7 @@ async fn process(
                         mergeboxes
                             .remove(description.collection.clone(), id, &document)
                             .await
-                            .context("Remove while processing insert event")?;
+                            .context("process -> Event::Insert")?;
                     }
                 }
             }
@@ -267,7 +271,7 @@ async fn process(
                 mergeboxes
                     .insert(description.collection.clone(), id.clone(), document)
                     .await
-                    .context("Insert while processing update event")?;
+                    .context("process -> Event::Update")?;
 
                 if let Some(index) = index_before {
                     let mut document = if description.limit().is_some() {
@@ -281,7 +285,7 @@ async fn process(
                     mergeboxes
                         .remove(description.collection.clone(), id, &document)
                         .await
-                        .context("Remove while processing update event")?;
+                        .context("process -> Event::Update")?;
                 }
             } else {
                 let id = extract_id(&mut document)?;
@@ -308,7 +312,7 @@ async fn process(
                     .await
                     .remove(description.collection.clone(), id, &document)
                     .await
-                    .context("Remove while processing update event")?;
+                    .context("process -> Event::Update")?;
             }
 
             Ok(false)

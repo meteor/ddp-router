@@ -238,7 +238,9 @@ async fn start_producer_client(
         let ddp_message = DDPMessage::try_from(&raw_message)
             .with_context(|| format!("Invalid DDP message from client: {raw_message:?}"))?;
         println!("\x1b[0;34mclient\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
-        process_message_client(&session, ddp_message).await?;
+        process_message_client(&session, ddp_message)
+            .await
+            .with_context(|| format!("While processing client message: {raw_message:?}"))?;
     }
 
     Ok(())
@@ -261,7 +263,9 @@ async fn start_producer_server(
         let ddp_message = DDPMessage::try_from(&raw_message)
             .with_context(|| format!("Invalid DDP message from server: {raw_message:?}"))?;
         println!("\x1b[0;36mserver\x1b[0m -> \x1b[0;33mrouter\x1b[0m {ddp_message:?}");
-        process_message_server(&session, ddp_message).await?;
+        process_message_server(&session, ddp_message)
+            .await
+            .with_context(|| format!("While processing server message: {raw_message:?}"))?;
     }
 
     Ok(())

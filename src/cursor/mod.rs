@@ -64,7 +64,7 @@ impl Cursor {
                 .await
                 .fetch(&mergeboxes)
                 .await
-                .context("Initial fetch")?;
+                .context("Cursor::start")?;
 
             // Start background task.
             let fetcher = self.fetcher.clone();
@@ -79,7 +79,7 @@ impl Cursor {
                             .await
                             .process(event, &mergeboxes)
                             .await
-                            .context("Processing event")?;
+                            .context("Cursor::start (process)")?;
                     },
                     Err(mut interval) => loop {
                         interval.tick().await;
@@ -88,7 +88,7 @@ impl Cursor {
                             .await
                             .fetch(&mergeboxes)
                             .await
-                            .context("Interval fetch")?;
+                            .context("Cursor::start (refetch)")?;
                     },
                 }
             }
@@ -113,7 +113,12 @@ impl Cursor {
         mergebox: &Arc<Mutex<Mergebox>>,
     ) -> Result<(), Error> {
         // Unregister all documents.
-        self.fetcher.read().await.unregister(mergebox).await?;
+        self.fetcher
+            .read()
+            .await
+            .unregister(mergebox)
+            .await
+            .context("Cursor::stop")?;
 
         // If it is the last one, stop the cursor. If it is the last one, stop
         // the background task.

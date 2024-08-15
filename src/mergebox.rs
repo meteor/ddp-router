@@ -24,7 +24,7 @@ impl Mergeboxes {
                 .await
                 .insert(collection.clone(), id.clone(), document.clone())
                 .await
-                .context("Insert within Mergeboxes")?;
+                .context("Mergeboxes::insert")?;
         }
 
         Ok(())
@@ -48,7 +48,7 @@ impl Mergeboxes {
                 .await
                 .remove(collection.clone(), id.clone(), document)
                 .await
-                .context("Remove within Mergeboxes")?;
+                .context("Mergeboxes::remove")?;
         }
 
         Ok(())
@@ -196,10 +196,10 @@ impl Mergebox {
         // Update `collections`.
         self.insert(collection.clone(), id.clone(), document_applied)
             .await
-            .context("Insert while server_changed")?;
+            .context("Mergebox::server_changed")?;
         self.remove(collection, id, &document)
             .await
-            .context("Remove while server_changed")
+            .context("Mergebox::server_changed")
     }
 
     pub async fn server_removed(&mut self, collection: String, id: Value) -> Result<(), Error> {
@@ -217,7 +217,7 @@ impl Mergebox {
         // Update `collections`.
         self.remove(collection, id, &document)
             .await
-            .context("Remove while server_removed")
+            .context("Mergebox::server_removed")
     }
 }
 
