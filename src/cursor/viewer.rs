@@ -32,7 +32,7 @@ impl TryFrom<&CursorDescription> for CursorViewer {
             .with_context(|| format!("sort {sort:?} is not supported"))?;
 
         ensure!(limit.is_none() || sort.is_some(), "limit requires sort");
-        ensure!(skip.is_none(), "skip is not supported");
+        ensure!(matches!(skip, None | Some(0)), "skip is not supported");
         ensure!(!*disable_oplog, "explicitly disabled");
 
         Ok(Self {
