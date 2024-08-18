@@ -283,8 +283,8 @@ pub async fn start_session(
     let (client_sink, client_stream) = client.split();
     let (server_sink, server_stream) = server.split();
 
-    let (client_writer, client_reader) = channel::<DDPMessage>(64);
-    let (server_writer, server_reader) = channel::<DDPMessage>(64);
+    let (client_writer, client_reader) = channel::<DDPMessage>(1024);
+    let (server_writer, server_reader) = channel::<DDPMessage>(1024);
 
     tasks.spawn(start_consumer_client(client_reader, client_sink));
     tasks.spawn(start_consumer_server(server_reader, server_sink));
@@ -312,7 +312,8 @@ pub async fn start_session(
         .lock()
         .await
         .stop_all(session.id, &session.mergebox)
-        .await?;
+        .await
+        .context("Clearing subscriptions while closing the session")?;
     result??;
     Ok(())
 }

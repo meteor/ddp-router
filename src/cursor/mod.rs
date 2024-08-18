@@ -101,6 +101,7 @@ impl Cursor {
             });
             let _ = self.task.insert(DropHandle::new(spawn(task)));
         } else {
+            println!("\x1b[0;32mmongo\x1b[0m reuse({:?})", self.description);
             self.fetcher.read().await.register(mergebox).await?;
         }
 
