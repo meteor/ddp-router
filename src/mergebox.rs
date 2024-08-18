@@ -1,6 +1,7 @@
 use crate::ddp::DDPMessage;
 use anyhow::{anyhow, Context, Error};
 use serde_json::{Map, Value};
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
@@ -9,7 +10,7 @@ use tokio::sync::Mutex;
 type Document = Map<String, Value>;
 
 #[derive(Default)]
-pub struct Mergeboxes(BTreeMap<usize, Arc<Mutex<Mergebox>>>);
+pub struct Mergeboxes(BTreeMap<usize, (usize, Arc<Mutex<Mergebox>>)>);
 
 impl Mergeboxes {
     pub async fn insert(
@@ -18,7 +19,7 @@ impl Mergeboxes {
         id: Value,
         document: Document,
     ) -> Result<(), Error> {
-        for mergebox in self.0.values_mut() {
+        for (_, mergebox) in self.0.values_mut() {
             mergebox
                 .lock()
                 .await
@@ -32,7 +33,10 @@ impl Mergeboxes {
 
     pub fn insert_mergebox(&mut self, session_id: usize, mergebox: &Arc<Mutex<Mergebox>>) -> bool {
         let is_first = self.0.is_empty();
-        self.0.entry(session_id).or_insert_with(|| mergebox.clone());
+        self.0
+            .entry(session_id)
+            .and_modify(|(counter, _)| *counter += 1)
+            .or_insert_with(|| (0, mergebox.clone()));
         is_first
     }
 
@@ -42,7 +46,7 @@ impl Mergeboxes {
         id: Value,
         document: &Document,
     ) -> Result<(), Error> {
-        for mergebox in self.0.values_mut() {
+        for (_, mergebox) in self.0.values_mut() {
             mergebox
                 .lock()
                 .await
@@ -55,7 +59,16 @@ impl Mergeboxes {
     }
 
     pub fn remove_mergebox(&mut self, session_id: usize) -> bool {
-        self.0.remove(&session_id).is_some() && self.0.is_empty()
+        if let Entry::Occupied(mut entry) = self.0.entry(session_id) {
+            if entry.get().0 == 0 {
+                entry.remove();
+                return self.0.is_empty();
+            }
+
+            entry.get_mut().0 -= 1;
+        }
+
+        false
     }
 }
 
